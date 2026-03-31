@@ -1,5 +1,6 @@
 {
   "name": "truelayer2actual",
+  "type": "module",
   "version": "1.0.0",
   "description": "Sync TrueLayer bank transactions to Actual Budget",
   "scripts": {
@@ -8,7 +9,7 @@
     "build": "tsc --outDir dist",
     "start:setup": "node dist/commands/setup.js",
     "start:sync": "node dist/commands/sync.js",
-    "test": "node --test"
+    "test": "node --import tsx/esm --test test/**/*.test.ts"
   },
   "dependencies": {
     "@actual-app/api": "latest",

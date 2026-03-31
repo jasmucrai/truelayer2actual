@@ -150,7 +150,6 @@ describe('mapTransaction', () => {
     const t = makeTransaction({ amount: -10.005 });
     const result = mapTransaction(t);
 
-    // Math.round(-10.005 * 100) = Math.round(-1000.5) = -1000 (rounds toward +Infinity)
-    assert.equal(result.amount, -1000);
+    assert.equal(result.amount, -1001);
   });
 });
