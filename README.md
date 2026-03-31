@@ -75,7 +75,8 @@ ACTUAL_ENCRYPTION_PASSWORD=         # optional — only if E2E encryption is ena
 # NODE_TLS_REJECT_UNAUTHORIZED=0
 
 # Sync behaviour
-SYNC_DAYS_LOOKBACK=7
+SYNC_DAYS_LOOKBACK=7      # how many days back to fetch on first run
+SYNC_INTERVAL_HOURS=0     # 0 = one-shot (use external cron); >0 = built-in loop
 SETUP_PORT=3000
 ```
 
@@ -132,7 +133,15 @@ Run a sync:
 docker compose run --rm truelayer2actual
 ```
 
-## Scheduling (Synology Task Scheduler)
+## Scheduling
+
+The sync command supports two modes, controlled by `SYNC_INTERVAL_HOURS` in `.env`:
+
+### Option A: External cron (default, `SYNC_INTERVAL_HOURS=0`)
+
+The container starts, syncs once, and exits. Scheduling is handled externally — ideal for Synology Task Scheduler or any cron.
+
+**Synology Task Scheduler:**
 
 1. **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**
 2. Run as: `root` (or a docker-capable user)
@@ -143,6 +152,21 @@ docker compose run --rm truelayer2actual
      run --rm truelayer2actual
    ```
 5. Enable **"Send run details by email"** and **"Send only when script terminates abnormally"**
+
+### Option B: Built-in loop (`SYNC_INTERVAL_HOURS=6`)
+
+Set `SYNC_INTERVAL_HOURS` to a positive number and the container runs continuously, syncing on that interval. Change `restart: "no"` to `restart: unless-stopped` in `docker-compose.yml`:
+
+```yaml
+services:
+  truelayer2actual:
+    image: truelayer2actual:latest
+    container_name: truelayer2actual
+    volumes:
+      - /volume1/docker/truelayer2actual/data:/app/data
+    env_file: .env
+    restart: unless-stopped
+```
 
 ## Sandbox / testing
 
