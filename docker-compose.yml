@@ -1,0 +1,15 @@
+services:
+  truelayer2actual:
+    image: yourname/actualsync:latest
+    container_name: truelayer2actual
+    volumes:
+      - /volume1/docker/truelayer2actual/data:/app/data
+    environment:
+      - TRUELAYER_CLIENT_ID=${TRUELAYER_CLIENT_ID}
+      - TRUELAYER_CLIENT_SECRET=${TRUELAYER_CLIENT_SECRET}
+      - TRUELAYER_REDIRECT_URI=${TRUELAYER_REDIRECT_URI}
+      - ACTUAL_SERVER_URL=${ACTUAL_SERVER_URL}
+      - ACTUAL_PASSWORD=${ACTUAL_PASSWORD}
+      - ACTUAL_SYNC_ID=${ACTUAL_SYNC_ID}
+      - SYNC_DAYS_LOOKBACK=${SYNC_DAYS_LOOKBACK:-7}
+    restart: "no"
