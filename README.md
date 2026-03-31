@@ -2,12 +2,12 @@
 
 Syncs UK bank transactions from [TrueLayer](https://truelayer.com) into a self-hosted [Actual Budget](https://actualbudget.org) instance.
 
-Designed for a single user running on a Synology NAS via Docker, triggered by an external scheduler — not a persistent process.
+Runs as a Docker container. Supports one-shot mode (triggered by external cron) or a built-in loop for continuous syncing.
 
 ## How it works
 
 1. **One-time setup** (`npm run setup`) — OAuth flow with TrueLayer, interactive pairing of bank accounts to Actual accounts, saves `data/config.json` and `data/tokens.json`.
-2. **Scheduled sync** (`npm run sync`) — reads config, refreshes the TrueLayer token, fetches new transactions per account, imports them into Actual, logs any balance drift, exits.
+2. **Sync** (`npm run sync`) — reads config, refreshes the TrueLayer token, fetches new transactions per account, imports them into Actual, logs any balance drift. Runs once and exits, or loops on an interval if `SYNC_INTERVAL_HOURS` is set.
 
 ```
 ┌─────────────────────────────────┐
@@ -20,7 +20,7 @@ Designed for a single user running on a Synology NAS via Docker, triggered by an
                  │ data/config.json
                  │ data/tokens.json
      ┌───────────▼──────────────────┐
-     │  npm run sync  (on cron)     │
+     │  npm run sync                │
      │  1. Load config + tokens     │
      │  2. Refresh TrueLayer token  │
      │  3. For each account:        │
@@ -122,7 +122,7 @@ services:
     image: truelayer2actual:latest
     container_name: truelayer2actual
     volumes:
-      - /volume1/docker/truelayer2actual/data:/app/data
+      - /path/to/data:/app/data
     env_file: .env
     restart: "no"  # triggered by cron, not always-on
 ```
@@ -181,7 +181,7 @@ TrueLayer provides a sandbox environment with a mock bank that returns predictab
 | Script | Description |
 |---|---|
 | `npm run setup` | One-time OAuth + account pairing |
-| `npm run sync` | Sync transactions (one-shot) |
+| `npm run sync` | Sync transactions (one-shot or loop) |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm run start:setup` | Run compiled setup |
 | `npm run start:sync` | Run compiled sync |
@@ -203,7 +203,7 @@ src/
 ├── mapper.ts           # TrueLayer transaction → Actual transaction
 ├── config.ts           # config.json read/write with zod validation
 └── logger.ts           # Structured logging
-data/                   # Gitignored — volume-mount this on your NAS
+data/                   # Gitignored — mount as a volume to persist state
 ├── tokens.json         # TrueLayer OAuth tokens
 ├── config.json         # Account mappings + sync state
 └── actual-cache/       # @actual-app/api local budget cache
