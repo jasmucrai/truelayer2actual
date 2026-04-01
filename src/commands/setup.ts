@@ -50,7 +50,7 @@ function buildAuthUrl(clientId: string, redirectUri: string, sandbox: boolean): 
     client_id: clientId,
     scope: 'accounts balance transactions cards offline_access',
     redirect_uri: redirectUri,
-    providers: 'uk-ob-all uk-oauth-all',
+    providers: 'uk-cs-mock uk-ob-all uk-oauth-all',
     prompt: 'consent',
   });
   return `${base}/?${params.toString()}`;
