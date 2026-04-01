@@ -63,7 +63,7 @@ Edit `.env`:
 # Use a sandbox- prefix client ID for testing
 TRUELAYER_CLIENT_ID=
 TRUELAYER_CLIENT_SECRET=
-TRUELAYER_REDIRECT_URI=http://localhost:3000/auth/callback
+TRUELAYER_REDIRECT_URI=http://localhost:3000/callback
 
 # Actual Budget
 ACTUAL_SERVER_URL=http://your-nas:5006
