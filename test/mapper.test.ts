@@ -15,10 +15,12 @@ const mockAmountToInteger = (n: number): number => Math.round(n * 100);
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
-// Pre-populate the require cache with a lightweight mock
-require.cache['@actual-app/api'] = {
-  id: '@actual-app/api',
-  filename: '@actual-app/api',
+// Pre-populate the require cache with a lightweight mock.
+// Must use the resolved file path as the key — require.cache indexes by path, not package name.
+const resolvedApiPath = require.resolve('@actual-app/api');
+require.cache[resolvedApiPath] = {
+  id: resolvedApiPath,
+  filename: resolvedApiPath,
   loaded: true,
   parent: null,
   children: [],
@@ -151,5 +153,28 @@ describe('mapTransaction', () => {
     const result = mapTransaction(t);
 
     assert.equal(result.amount, -1001);
+  });
+
+  it('negates amount for card purchases (isCard=true)', () => {
+    // TrueLayer returns card purchases as positive; Actual needs negative to increase liability
+    const t = makeTransaction({ amount: 25.0, transaction_type: 'debit' });
+    const result = mapTransaction(t, true);
+
+    assert.equal(result.amount, -2500);
+  });
+
+  it('negates amount for card refunds (isCard=true)', () => {
+    // TrueLayer returns card refunds as negative; Actual needs positive to reduce liability
+    const t = makeTransaction({ amount: -15.0, transaction_type: 'credit' });
+    const result = mapTransaction(t, true);
+
+    assert.equal(result.amount, 1500);
+  });
+
+  it('does not negate amount for bank accounts (isCard=false)', () => {
+    const t = makeTransaction({ amount: -12.5 });
+    const result = mapTransaction(t, false);
+
+    assert.equal(result.amount, -1250);
   });
 });

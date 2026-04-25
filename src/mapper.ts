@@ -10,12 +10,14 @@ export interface ActualTransaction {
   cleared: boolean;
 }
 
-export function mapTransaction(t: TrueLayerTransaction): ActualTransaction {
+export function mapTransaction(t: TrueLayerTransaction, isCard = false): ActualTransaction {
   // Extract date portion from ISO 8601 timestamp
   const date = t.timestamp.split('T')[0];
 
-  // Convert amount to integer pence — TrueLayer negatives match Actual convention
-  const amount = utils.amountToInteger(t.amount);
+  // TrueLayer returns card purchases as positive amounts (charges to the card),
+  // but Actual expects negative amounts for a credit card account (increasing liability).
+  const rawAmount = isCard ? -t.amount : t.amount;
+  const amount = utils.amountToInteger(rawAmount);
 
   // Prefer merchant_name, fall back to description
   const payee_name = t.merchant_name ?? t.description;

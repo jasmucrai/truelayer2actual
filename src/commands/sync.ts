@@ -131,7 +131,8 @@ async function main(): Promise<void> {
         : await fetchTransactions(accessToken, account.truelayerAccountId, from, to);
       logger.info(`[${account.name}] Fetched ${txns.length} transaction(s)`);
 
-      const mapped = txns.map(mapTransaction);
+      const isCard = account.accountKind === 'card';
+      const mapped = txns.map((t) => mapTransaction(t, isCard));
       const result = await importToActual(account.actualAccountId, mapped);
 
       logger.info(`[${account.name}] +${result.added.length} added, ${result.updated.length} updated`);
