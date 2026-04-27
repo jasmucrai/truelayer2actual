@@ -117,7 +117,7 @@ async function main(): Promise<void> {
       const from = account.lastSyncedAt
         ? account.lastSyncedAt.split('T')[0]
         : daysAgo(lookback);
-      const to = today();
+      const to = daysAgo(-1);
 
       logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
 
