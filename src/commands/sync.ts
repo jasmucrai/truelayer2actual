@@ -114,6 +114,7 @@ async function main(): Promise<void> {
       const accessToken = connectionTokens.get(account.connectionId)!;
 
       const lookback = Number(process.env.SYNC_DAYS_LOOKBACK ?? '7');
+      const to = today();
       const lastSyncDate = account.lastSyncedAt
         ? account.lastSyncedAt.split('T')[0]
         : daysAgo(lookback);
