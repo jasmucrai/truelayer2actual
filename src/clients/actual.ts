@@ -132,6 +132,12 @@ export async function importToActual(
   return result;
 }
 
+export async function getActualAccountBalance(accountId: string): Promise<number> {
+  return (api as unknown as {
+    getAccountBalance: (accountId: string) => Promise<number>;
+  }).getAccountBalance(accountId);
+}
+
 export async function getActualTransactions(
   accountId: string,
   startDate: string,

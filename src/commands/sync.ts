@@ -14,8 +14,7 @@ import {
   initActual,
   shutdownActual,
   importToActual,
-  getActualTransactions,
-  type ActualTransaction,
+  getActualAccountBalance,
 } from '../clients/actual.js';
 import { mapTransaction } from '../mapper.js';
 import { logger } from '../logger.js';
@@ -55,29 +54,25 @@ async function validateBalance(accessToken: string, account: Account): Promise<v
     return;
   }
 
-  const startDate = daysAgo(30);
-  const endDate = today();
-
-  let actualTxns: ActualTransaction[];
+  let actualBalancePence: number;
   try {
-    actualTxns = await getActualTransactions(account.actualAccountId, startDate, endDate);
+    actualBalancePence = await getActualAccountBalance(account.actualAccountId);
   } catch (err) {
     logger.warn(
-      `[${account.name}] Could not fetch Actual transactions for balance validation:`,
+      `[${account.name}] Could not fetch Actual balance for validation:`,
       err instanceof Error ? err.message : String(err)
     );
     return;
   }
 
-  const actualSum = actualTxns.reduce((sum, t) => sum + t.amount, 0);
   const tlCurrentPence = Math.round(tlBalance.current * 100);
-  const drift = Math.abs(tlCurrentPence - actualSum);
+  const drift = Math.abs(tlCurrentPence - actualBalancePence);
 
   if (drift > DRIFT_THRESHOLD_PENCE) {
     logger.warn(
       `[${account.name}] Balance drift! ` +
         `TrueLayer: £${tlBalance.current.toFixed(2)}, ` +
-        `Actual (last 30d): £${(actualSum / 100).toFixed(2)}, ` +
+        `Actual: £${(actualBalancePence / 100).toFixed(2)}, ` +
         `Drift: £${(drift / 100).toFixed(2)}`
     );
   } else {
