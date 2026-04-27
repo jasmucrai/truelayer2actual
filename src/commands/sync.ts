@@ -114,10 +114,12 @@ async function main(): Promise<void> {
       const accessToken = connectionTokens.get(account.connectionId)!;
 
       const lookback = Number(process.env.SYNC_DAYS_LOOKBACK ?? '7');
-      const from = account.lastSyncedAt
+      const lastSyncDate = account.lastSyncedAt
         ? account.lastSyncedAt.split('T')[0]
         : daysAgo(lookback);
-      const to = daysAgo(-1);
+      // Step back one extra day so today's transactions aren't excluded by TrueLayer's exclusive `to`
+      const from = daysAgo(Math.max(0, Math.ceil((Date.now() - new Date(lastSyncDate).getTime()) / 86_400_000) - 1) + 1);
+      const to = today();
 
       logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
 
