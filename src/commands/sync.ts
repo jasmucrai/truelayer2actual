@@ -118,9 +118,10 @@ async function main(): Promise<void> {
       const lastSyncDate = account.lastSyncedAt
         ? account.lastSyncedAt.split('T')[0]
         : daysAgo(lookback);
-      // TrueLayer's `to` is exclusive, so ensure `from` is always before `to` (today)
-      const from = lastSyncDate >= to ? daysAgo(1) : lastSyncDate;
-      const to = today();
+      // Look back at least `lookback` days so transactions pending at last sync
+      // that have since settled are not missed (TrueLayer `to` is exclusive).
+      const floor = daysAgo(lookback);
+      const from = lastSyncDate >= to ? daysAgo(1) : (lastSyncDate < floor ? lastSyncDate : floor);
 
       logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
 
