@@ -157,28 +157,47 @@ async function authenticateBank(
 // Interactive account picker (shared for accounts and cards)
 // ---------------------------------------------------------------------------
 
+async function fetchActualAccounts(): Promise<ActualAccount[]> {
+  await initActual();
+  const accounts = await getActualAccounts();
+  await shutdownActual();
+  return accounts;
+}
+
 async function pickActualAccount(
   rl: readline.Interface,
   actualAccounts: ActualAccount[],
   label: string
-): Promise<ActualAccount | null> {
-  console.log(`\n${label}`);
-  console.log('Actual accounts:');
-  actualAccounts.forEach((a, i) => {
-    console.log(`  ${i + 1}. ${a.name}${a.offbudget ? ' (off-budget)' : ''}`);
-  });
+): Promise<{ account: ActualAccount | null; actualAccounts: ActualAccount[] }> {
+  let accounts = actualAccounts;
+
+  function printAccounts(): void {
+    console.log(`\n${label}`);
+    console.log('Actual accounts:');
+    accounts.forEach((a, i) => {
+      console.log(`  ${i + 1}. ${a.name}${a.offbudget ? ' (off-budget)' : ''}`);
+    });
+  }
+
+  printAccounts();
 
   while (true) {
-    const answer = await prompt(rl, `Select [1-${actualAccounts.length} / s to skip]: `);
+    const answer = await prompt(rl, `Select [1-${accounts.length} / s to skip / r to refresh]: `);
     if (answer.toLowerCase() === 's') {
       logger.info(`Skipped: ${label}`);
-      return null;
+      return { account: null, actualAccounts: accounts };
+    }
+    if (answer.toLowerCase() === 'r') {
+      logger.info('Refreshing Actual accounts...');
+      accounts = await fetchActualAccounts();
+      printAccounts();
+      continue;
     }
     const num = parseInt(answer, 10);
-    if (!isNaN(num) && num >= 1 && num <= actualAccounts.length) {
-      return actualAccounts[num - 1];
+    if (!isNaN(num) && num >= 1 && num <= accounts.length) {
+      return { account: accounts[num - 1], actualAccounts: accounts };
     }
-    console.log(`Invalid. Enter 1–${actualAccounts.length} or "s".`);
+    console.log(`Invalid. Enter 1–${accounts.length}, "s" to skip, or "r" to refresh.`);
   }
 }
 
@@ -242,9 +261,7 @@ async function main(): Promise<void> {
 
   // Connect to Actual and get accounts for pairing
   logger.info('Connecting to Actual Budget...');
-  await initActual();
-  const actualAccounts = await getActualAccounts();
-  await shutdownActual();
+  const actualAccounts = await fetchActualAccounts();
 
   if (actualAccounts.length === 0) {
     logger.error(
@@ -264,16 +281,19 @@ async function main(): Promise<void> {
   console.log('Account Pairing');
   console.log('===========================================================');
   console.log('For each bank account, choose the matching Actual account.');
-  console.log('Enter the number, or "s" to skip.\n');
+  console.log('Enter the number, "s" to skip, or "r" to refresh the Actual account list.\n');
+
+  let currentActualAccounts = actualAccounts;
 
   for (const { connectionId, tlAccounts, tlCards } of allConnections) {
     // Pair bank accounts
     for (const tlAccount of tlAccounts) {
-      const picked = await pickActualAccount(
+      const { account: picked, actualAccounts: refreshed } = await pickActualAccount(
         rl,
-        actualAccounts,
+        currentActualAccounts,
         `${tlAccount.provider.display_name} — ${tlAccount.display_name} (${tlAccount.account_type}) [${tlAccount.currency}]`
       );
+      currentActualAccounts = refreshed;
       if (picked) {
         pairedAccounts.push({
           name: tlAccount.display_name,
@@ -292,7 +312,8 @@ async function main(): Promise<void> {
       const label = `${tlCard.provider.display_name} — ${tlCard.display_name}` +
         (tlCard.partial_card_number ? ` (****${tlCard.partial_card_number})` : '') +
         ` [${tlCard.card_type}] [${tlCard.currency}]`;
-      const picked = await pickActualAccount(rl, actualAccounts, label);
+      const { account: picked, actualAccounts: refreshed } = await pickActualAccount(rl, currentActualAccounts, label);
+      currentActualAccounts = refreshed;
       if (picked) {
         pairedAccounts.push({
           name: tlCard.display_name,
