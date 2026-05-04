@@ -322,28 +322,36 @@ async function main(): Promise<void> {
     // First run
   }
 
-  const finalAccounts: Account[] = pairedAccounts.map((account) => {
-    const existing = existingConfig?.accounts.find(
+  // Merge: keep existing accounts, overwrite any that were re-paired, append new ones
+  const existingAccounts = existingConfig?.accounts ?? [];
+  const mergedAccounts: Account[] = [...existingAccounts];
+  for (const account of pairedAccounts) {
+    const idx = mergedAccounts.findIndex(
       (a) => a.truelayerAccountId === account.truelayerAccountId
     );
-    return existing ? { ...existing, ...account } : account;
-  });
+    if (idx !== -1) {
+      // Re-authenticated: update connection/pairing but preserve lastSyncedAt
+      mergedAccounts[idx] = { ...mergedAccounts[idx], ...account };
+    } else {
+      mergedAccounts.push(account);
+    }
+  }
 
   const config: Config = {
-    accounts: finalAccounts,
+    accounts: mergedAccounts,
     createdAt: existingConfig?.createdAt ?? new Date().toISOString(),
   };
   await saveConfig(config);
-  logger.info(`Config saved (${finalAccounts.length} account(s))`);
+  logger.info(`Config saved (${mergedAccounts.length} account(s))`);
 
   // Remove token connections that are no longer referenced
-  const activeConnectionIds = new Set(finalAccounts.map((a) => a.connectionId));
+  const activeConnectionIds = new Set(mergedAccounts.map((a) => a.connectionId));
   removeStaleConnections(activeConnectionIds);
 
   console.log('\n===========================================================');
   console.log('Setup complete!');
   console.log('===========================================================');
-  console.log(`\nPaired ${pairedAccounts.length} account(s):`);
+  console.log(`\nPaired ${pairedAccounts.length} new/updated account(s):`);
   pairedAccounts.forEach((a) => console.log(`  - ${a.name}`));
   console.log('\nNext steps:');
   console.log('  npm run sync              # sync now');
