@@ -65,7 +65,9 @@ async function validateBalance(accessToken: string, account: Account): Promise<v
     return;
   }
 
-  const tlCurrentPence = Math.round(tlBalance.current * 100);
+  // TrueLayer reports card balances as positive (amount owed), but Actual stores
+  // credit card accounts as negative — negate so both are on the same scale.
+  const tlCurrentPence = Math.round(tlBalance.current * 100) * (account.accountKind === 'card' ? -1 : 1);
   const drift = Math.abs(tlCurrentPence - actualBalancePence);
 
   if (drift > DRIFT_THRESHOLD_PENCE) {
