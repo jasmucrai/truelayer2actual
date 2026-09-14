@@ -66,21 +66,20 @@ interface TrueLayerResponse<T> {
   status: string;
 }
 
-export function isSandbox(): boolean {
-  const clientId = process.env.TRUELAYER_CLIENT_ID ?? '';
+export function isSandbox(clientId = process.env.TRUELAYER_CLIENT_ID ?? ''): boolean {
   return clientId.startsWith('sandbox-');
 }
 
-export function apiBaseUrl(): string {
-  return isSandbox()
-    ? 'https://api.truelayer-sandbox.com'
-    : 'https://api.truelayer.com';
+export function apiBaseUrl(sandbox = isSandbox()): string {
+  return sandbox ? 'https://api.truelayer-sandbox.com' : 'https://api.truelayer.com';
 }
 
-export function authBaseUrl(): string {
-  return isSandbox()
-    ? 'https://auth.truelayer-sandbox.com'
-    : 'https://auth.truelayer.com';
+export function authBaseUrl(sandbox = isSandbox()): string {
+  return sandbox ? 'https://auth.truelayer-sandbox.com' : 'https://auth.truelayer.com';
+}
+
+export function tokenUrl(sandbox = isSandbox()): string {
+  return `${authBaseUrl(sandbox)}/connect/token`;
 }
 
 function baseUrl(): string {

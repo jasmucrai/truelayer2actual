@@ -7,7 +7,7 @@ import { logger } from '../logger.js';
 import { atomicWriteFile } from '../util/fs.js';
 import { withStateLock } from '../util/lock.js';
 import { HTTP_TIMEOUT_MS, describeErrorBody } from '../util/http.js';
-import { isSandbox, tokenUrl } from './oauth.js';
+import { isSandbox, tokenUrl } from '../clients/truelayer.js';
 
 const TokenSchema = z.object({
   accessToken: z.string(),
