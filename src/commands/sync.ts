@@ -90,6 +90,18 @@ function daysAgo(n: number): string {
   return d.toISOString().split('T')[0];
 }
 
+/** Parse SYNC_DAYS_LOOKBACK, defaulting to 7 days when missing or invalid. */
+export function syncLookbackDays(): number {
+  const raw = process.env.SYNC_DAYS_LOOKBACK;
+  if (raw === undefined || raw.trim() === '') return 7;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    logger.warn(`Ignoring invalid SYNC_DAYS_LOOKBACK "${raw}" — using 7 days.`);
+    return 7;
+  }
+  return Math.floor(n);
+}
+
 export function dashboardUrl(): string | undefined {
   return process.env.DASHBOARD_URL;
 }
@@ -303,7 +315,7 @@ async function syncAccount(
   summary: SyncSummary
 ): Promise<void> {
   try {
-    const lookback = Number(process.env.SYNC_DAYS_LOOKBACK ?? '7');
+    const lookback = syncLookbackDays();
     const to = today();
     const lastSyncDate = account.lastSyncedAt
       ? account.lastSyncedAt.split('T')[0]
