@@ -41,8 +41,10 @@ export const withSyncLock = createMutex();
 // Date helpers
 // ---------------------------------------------------------------------------
 
-function today(): string {
-  return new Date().toISOString().split('T')[0];
+const MS_PER_DAY = 86_400_000;
+
+function toDateString(ms: number): string {
+  return new Date(ms).toISOString().split('T')[0];
 }
 
 function shiftDate(date: string, days: number): string {
@@ -84,10 +86,27 @@ async function migrateImportedIds(
   }
 }
 
-function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().split('T')[0];
+export interface SyncWindow {
+  from: string;
+  to: string;
+}
+
+/**
+ * Work out the inclusive date range to fetch for an account. Always looks back
+ * at least `lookbackDays` so transactions that were pending last time but have
+ * since settled are re-fetched, extending further when the last sync is older
+ * than that. All arithmetic is in UTC milliseconds, so it is unaffected by the
+ * host timezone or DST.
+ */
+export function resolveSyncWindow(
+  lastSyncedAt: string | undefined,
+  lookbackDays: number,
+  nowMs = Date.now()
+): SyncWindow {
+  const floor = toDateString(nowMs - lookbackDays * MS_PER_DAY);
+  const lastSyncDate = lastSyncedAt ? lastSyncedAt.split('T')[0] : floor;
+  const from = lastSyncDate < floor ? lastSyncDate : floor;
+  return { from, to: toDateString(nowMs) };
 }
 
 /** Parse SYNC_DAYS_LOOKBACK, defaulting to 7 days when missing or invalid. */
@@ -315,15 +334,7 @@ async function syncAccount(
   summary: SyncSummary
 ): Promise<void> {
   try {
-    const lookback = syncLookbackDays();
-    const to = today();
-    const lastSyncDate = account.lastSyncedAt
-      ? account.lastSyncedAt.split('T')[0]
-      : daysAgo(lookback);
-    // Always look back at least `lookback` days so transactions that were pending
-    // at last sync but have since settled are not missed.
-    const floor = daysAgo(lookback);
-    const from = lastSyncDate < floor ? lastSyncDate : floor;
+    const { from, to } = resolveSyncWindow(account.lastSyncedAt, syncLookbackDays());
 
     logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
 
