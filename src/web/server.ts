@@ -808,9 +808,15 @@ export function createApp(): Express {
   );
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    logger.error('HTTP request failed:', err.message);
-    res.status(500).send(messagePage('Something went wrong', err.message, { error: true }));
+  app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+    logger.error(`HTTP ${req.method} ${req.path} failed:`, err.message);
+    res.status(500).send(
+      messagePage(
+        'Something went wrong',
+        'An unexpected error occurred. Check the server logs for details.',
+        { error: true }
+      )
+    );
   });
 
   return app;
