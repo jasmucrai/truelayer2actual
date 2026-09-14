@@ -6,13 +6,20 @@ const raw = (process.env.LOG_LEVEL ?? 'info').toLowerCase();
 const threshold =
   raw in LEVEL_ORDER ? LEVEL_ORDER[raw as Level] : LEVEL_ORDER.info;
 
+function stringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    // Circular references, BigInt, etc. Never let logging itself throw.
+    return '[unserialisable]';
+  }
+}
+
 function formatMessage(level: string, args: unknown[]): string {
   const timestamp = new Date().toISOString();
   const message = args
     .map((arg) =>
-      typeof arg === 'object' && arg !== null
-        ? JSON.stringify(arg)
-        : String(arg)
+      typeof arg === 'object' && arg !== null ? stringify(arg) : String(arg)
     )
     .join(' ');
   return `${timestamp} [${level}] ${message}`;
