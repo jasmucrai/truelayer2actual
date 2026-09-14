@@ -76,13 +76,8 @@ export function mapTransaction(t: TrueLayerTransaction, isCard = false): ActualT
   // Prefer merchant_name, fall back to description
   const payee_name = t.merchant_name ?? t.description;
 
-  // Determine cleared status: use status field if present, otherwise default to true
-  let cleared: boolean;
-  if ('status' in t && t.status !== undefined) {
-    cleared = t.status === 'booked';
-  } else {
-    cleared = true;
-  }
+  // Status is 'booked' | 'pending' when present; anything else counts as cleared.
+  const cleared = t.status === undefined ? true : t.status === 'booked';
 
   return {
     date,
