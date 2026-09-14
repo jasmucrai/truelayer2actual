@@ -493,7 +493,8 @@ async function runSyncInternal(): Promise<SyncSummary> {
   return summary;
 }
 
-async function main(): Promise<void> {
+/** One-shot run: sync, then release the Actual Budget client. */
+async function runOnce(): Promise<void> {
   try {
     await runSync();
   } finally {
@@ -506,16 +507,32 @@ async function loop(): Promise<void> {
 
   if (intervalHours <= 0) {
     // One-shot mode (for external schedulers like Synology Task Scheduler)
-    await main();
+    await runOnce();
     return;
   }
 
   const intervalMs = intervalHours * 60 * 60 * 1000;
   logger.info(`Running in loop mode — syncing every ${intervalHours} hour(s)`);
 
+  // Keep the Actual client initialised between iterations and release it only
+  // on shutdown. Shutting it down and re-initialising every cycle would rely on
+  // undocumented re-init behaviour in @actual-app/api.
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`Received ${signal} — shutting down`);
+    // Let an in-flight sync finish so state files are not cut off mid-write.
+    await lastSyncSettled();
+    await shutdownActual();
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    await main().catch((err) => {
+    await runSync().catch((err) => {
       logger.error('Sync failed:', describeError(err));
     });
     logger.info(`Next sync in ${intervalHours} hour(s)...`);
