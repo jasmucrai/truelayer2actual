@@ -419,6 +419,12 @@ export interface ReconcileResult {
  * Repoint existing mappings at a (possibly new) connection id after re-auth,
  * without touching pairings or `lastSyncedAt`. Pure helper so the risky part
  * of the callback is unit-testable.
+ *
+ * Deliberately repoints accounts the new consent did *not* return as well
+ * (they are reported in `missing`). A bank can omit an account it will list
+ * again later, so the pairing is preserved rather than dropped; callers log
+ * the omission. This means a genuinely closed account keeps its mapping and
+ * may fail to fetch each sync until the user removes it.
  */
 export function reconcileConfigAccounts(
   accounts: Account[],
