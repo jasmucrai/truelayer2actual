@@ -1,14 +1,8 @@
 import { utils } from '@actual-app/api';
 import type { TrueLayerTransaction } from './clients/truelayer.js';
+import type { ActualTransaction } from './clients/actual.js';
 
-export interface ActualTransaction {
-  date: string; // 'YYYY-MM-DD'
-  amount: number; // integer pence, from utils.amountToInteger()
-  payee_name?: string; // merchant_name || description
-  notes?: string; // description
-  imported_id: string; // see importedIdFor
-  cleared: boolean;
-}
+export type { ActualTransaction };
 
 /**
  * The ID used as Actual's `imported_id`.

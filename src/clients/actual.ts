@@ -208,11 +208,11 @@ export interface ActualAccount {
 }
 
 export interface ActualTransaction {
-  date: string;
-  amount: number;
-  payee_name?: string;
-  notes?: string;
-  imported_id: string;
+  date: string; // 'YYYY-MM-DD'
+  amount: number; // integer pence, from utils.amountToInteger()
+  payee_name?: string; // merchant_name || description
+  notes?: string; // description
+  imported_id: string; // see importedIdFor in mapper.ts
   cleared: boolean;
 }
 
@@ -324,20 +324,4 @@ export async function setActualImportedId(id: string, importedId: string): Promi
   await (api as unknown as {
     updateTransaction: (id: string, fields: { imported_id: string }) => Promise<unknown>;
   }).updateTransaction(id, { imported_id: importedId });
-}
-
-export async function getActualTransactions(
-  accountId: string,
-  startDate: string,
-  endDate: string
-): Promise<ActualTransaction[]> {
-  const transactions = await (api as unknown as {
-    getTransactions: (
-      accountId: string,
-      startDate: string,
-      endDate: string
-    ) => Promise<ActualTransaction[]>;
-  }).getTransactions(accountId, startDate, endDate);
-
-  return transactions;
 }
