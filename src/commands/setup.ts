@@ -377,10 +377,12 @@ async function main(): Promise<void> {
       if (picked) {
         pairedAccounts.push({
           name: tlAccount.display_name,
+          provider: tlAccount.provider.display_name,
           connectionId,
           accountKind: 'account' as const,
           truelayerAccountId: tlAccount.account_id,
           actualAccountId: picked.id,
+          actualAccountName: picked.name,
           currency: tlAccount.currency,
         });
         logger.info(`Paired: "${tlAccount.display_name}" → "${picked.name}"`);
@@ -397,10 +399,13 @@ async function main(): Promise<void> {
       if (picked) {
         pairedAccounts.push({
           name: tlCard.display_name,
+          provider: tlCard.provider.display_name,
           connectionId,
           accountKind: 'card' as const,
           truelayerAccountId: tlCard.account_id,
+          partialCardNumber: tlCard.partial_card_number,
           actualAccountId: picked.id,
+          actualAccountName: picked.name,
           currency: tlCard.currency,
         });
         logger.info(`Paired card: "${tlCard.display_name}" → "${picked.name}"`);

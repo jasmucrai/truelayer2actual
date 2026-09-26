@@ -1,0 +1,22 @@
+# Nothing outside src/, package*.json and tsconfig.json is copied into the image,
+# so everything here is about keeping the build context small - and about making
+# sure a future `COPY . .` cannot quietly pull secrets or real data in.
+
+# Secrets, and the pairing state the syncer owns at runtime
+.env
+.env.*
+data/
+
+# Reinstalled in the image by `npm ci`, so shipping 246M of it is wasted upload
+node_modules/
+
+# Build output - the image compiles its own from src/
+dist/
+
+.git/
+.gitignore
+.github/
+*.md
+.vscode/
+.DS_Store
+npm-debug.log*

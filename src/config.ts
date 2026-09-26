@@ -5,10 +5,24 @@ import { logger } from './logger.js';
 
 const AccountSchema = z.object({
   name: z.string(),
+  // The bank behind the account, e.g. MBNA. TrueLayer's own display_name is
+  // often generic ("Personal GBP"), so the provider is what makes a row in
+  // `just list` identifiable. Optional because accounts paired before this
+  // existed have no value until `just relabel` fills one in.
+  provider: z.string().optional(),
   connectionId: z.string(),
   accountKind: z.enum(['account', 'card']).default('account'),
   truelayerAccountId: z.string(),
+  // Last few digits, cards only. TrueLayer names every card on an account the
+  // same thing ("MASTERCARD"), so this is the only field that tells two of them
+  // apart in `just list`. Absent for bank accounts, and for the odd card issuer
+  // that does not return it.
+  partialCardNumber: z.string().optional(),
   actualAccountId: z.string(),
+  // Denormalised copy of the Actual account's name, purely so the pairing can
+  // be read back without loading the whole budget. Actual remains the owner -
+  // rename an account there and this goes stale until the next `just relabel`.
+  actualAccountName: z.string().optional(),
   currency: z.string().default('GBP'),
   lastSyncedAt: z.string().optional(),
   // Set by setup for an account that already holds history (e.g. migrated from
