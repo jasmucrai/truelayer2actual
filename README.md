@@ -38,19 +38,11 @@ Runs as a Docker container. Supports one-shot mode (triggered by external cron) 
 
 - A [TrueLayer](https://console.truelayer.com) account with a registered application
 - A self-hosted [Actual Budget](https://actualbudget.org) server
-- Node.js 20+ (or Docker)
+- Docker (or Node.js 20+ if running locally)
 
 ## Setup
 
-### 1. Clone and install
-
-```bash
-git clone https://github.com/jasmucrai/truelayer2actual.git
-cd truelayer2actual
-npm install
-```
-
-### 2. Configure environment
+### 1. Configure environment
 
 ```bash
 cp .env.example .env
@@ -80,46 +72,17 @@ SYNC_INTERVAL_HOURS=0     # 0 = one-shot (use external cron); >0 = built-in loop
 SETUP_PORT=3000
 ```
 
-> **Important:** `@actual-app/api` must match your Actual server version. If you get an `out-of-sync-migrations` error, run:
-> ```bash
-> npm install @actual-app/api@<your-server-version>
-> ```
+> **Important:** `@actual-app/api` must match your Actual server version. If you get an `out-of-sync-migrations` error, see the [Local setup](#local-setup) section.
 
-### 3. Pair accounts
+### 2. Docker setup
 
-```bash
-npm run setup
-```
-
-This opens a browser for TrueLayer OAuth, then prompts you to map each bank account/card to an Actual account. Supports multiple banks — you'll be asked after each one if you want to add another.
-
-### 4. Sync
-
-```bash
-npm run sync
-```
-
-On first run it fetches the last `SYNC_DAYS_LOOKBACK` days. Subsequent runs use the last sync timestamp as the start date.
-
-## Docker
-
-### Build and run setup
-
-```bash
-docker build -t truelayer2actual .
-docker run --rm -it \
-  -p 3000:3000 \
-  -v /path/to/data:/app/data \
-  --env-file .env \
-  truelayer2actual node dist/commands/setup.js
-```
-
-### docker-compose.yml
+Pull the pre-built image from GitHub Container Registry:
 
 ```yaml
+# docker-compose.yml
 services:
   truelayer2actual:
-    image: truelayer2actual:latest
+    image: ghcr.io/jasmucrai/truelayer2actual:latest
     container_name: truelayer2actual
     volumes:
       - /path/to/data:/app/data
@@ -127,11 +90,27 @@ services:
     restart: "no"  # triggered by cron, not always-on
 ```
 
+See [releases](https://github.com/jasmucrai/truelayer2actual/releases) for available versions.
+
+### 3. Pair accounts
+
+Run setup (one-time only) to authenticate with TrueLayer and map bank accounts to Actual:
+
+```bash
+docker compose run --rm truelayer2actual node dist/commands/setup.js
+```
+
+This opens a browser for TrueLayer OAuth, then prompts you to map each bank account/card to an Actual account. Supports multiple banks — you'll be asked after each one if you want to add another.
+
+### 4. Sync
+
 Run a sync:
 
 ```bash
 docker compose run --rm truelayer2actual
 ```
+
+On first run it fetches the last `SYNC_DAYS_LOOKBACK` days. Subsequent runs use the last sync timestamp as the start date.
 
 ## Scheduling
 
@@ -160,7 +139,7 @@ Set `SYNC_INTERVAL_HOURS` to a positive number and the container runs continuous
 ```yaml
 services:
   truelayer2actual:
-    image: truelayer2actual:latest
+    image: ghcr.io/jasmucrai/truelayer2actual:latest
     container_name: truelayer2actual
     volumes:
       - /volume1/docker/truelayer2actual/data:/app/data
@@ -174,7 +153,28 @@ TrueLayer provides a sandbox environment with a mock bank that returns predictab
 
 1. Create a sandbox app at [console.truelayer.com](https://console.truelayer.com)
 2. Set `TRUELAYER_CLIENT_ID=sandbox-<your-id>` in `.env` — the `sandbox-` prefix is detected automatically and switches all API calls to sandbox endpoints
-3. Run `npm run setup` and authenticate with **Mock Bank**
+3. Run `docker compose run --rm truelayer2actual node dist/commands/setup.js` and authenticate with **Mock Bank**
+
+## Local setup
+
+If you need to customize the image or build locally:
+
+```bash
+git clone https://github.com/jasmucrai/truelayer2actual.git
+cd truelayer2actual
+npm install
+npm run build
+docker build -t truelayer2actual .
+```
+
+Then update your `docker-compose.yml`:
+
+```yaml
+services:
+  truelayer2actual:
+    image: truelayer2actual:latest
+    # ... rest of config
+```
 
 ## npm scripts
 
