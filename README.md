@@ -2,35 +2,35 @@
 
 Syncs UK bank transactions from [TrueLayer](https://truelayer.com) into a self-hosted [Actual Budget](https://actualbudget.org) instance.
 
-Runs as a Docker container. Supports one-shot mode (triggered by external cron) or a built-in loop for continuous syncing.
+Runs as a Docker container. The default is an always-on process: an Express dashboard (add banks, pair accounts, reconnect, manual sync) plus a sync scheduler in a single Node process. One-shot mode (triggered by external cron) is also supported.
 
 ## How it works
 
-1. **One-time setup** (`npm run setup`) — OAuth flow with TrueLayer, interactive pairing of bank accounts to Actual accounts, saves `data/config.json` and `data/tokens.json`.
-2. **Sync** (`npm run sync`) — reads config, refreshes the TrueLayer token, fetches new transactions per account, imports them into Actual, logs any balance drift. Runs once and exits, or loops on an interval if `SYNC_INTERVAL_HOURS` is set.
+1. **One-time setup** — OAuth flow with TrueLayer, pairing of bank accounts to Actual accounts. Do it from the dashboard in a browser, or via the CLI (`npm run setup` locally / `node dist/commands/setup.js` in Docker). Saves `data/config.json` and `data/tokens.json`.
+2. **Sync** — reads config, refreshes the TrueLayer token, fetches new transactions per account, imports them into Actual, logs any balance drift. Runs on the built-in scheduler (every `SYNC_INTERVAL_HOURS`), on demand from the dashboard, or once via `node dist/commands/sync.js`.
 
 ```
 ┌─────────────────────────────────┐
-│  npm run setup  (run once)      │
+│  setup  (dashboard or CLI)      │
 │  - TrueLayer OAuth via browser  │
 │  - List bank accounts + cards   │
-│  - Interactive CLI pairing      │
+│  - Pair to Actual accounts      │
 │  - Save config.json + tokens    │
 └────────────────┬────────────────┘
                  │ data/config.json
                  │ data/tokens.json
      ┌───────────▼──────────────────┐
-     │  npm run sync                │
+     │  node dist/commands/serve.js │
      │  1. Load config + tokens     │
      │  2. Refresh TrueLayer token  │
-     │  3. For each account:        │
+     │  3. For each connection:     │
      │     a. Fetch transactions    │
      │     b. Map to Actual format  │
      │     c. importTransactions()  │
      │     d. Log balance drift     │
      │  4. Save updated config      │
-     │  5. api.shutdown()           │
-     │  6. exit 0                   │
+     │  (one dead bank never stops  │
+     │   the others or the process) │
      └──────────────────────────────┘
 ```
 
@@ -38,19 +38,11 @@ Runs as a Docker container. Supports one-shot mode (triggered by external cron) 
 
 - A [TrueLayer](https://console.truelayer.com) account with a registered application
 - A self-hosted [Actual Budget](https://actualbudget.org) server
-- Node.js 20+ (or Docker)
+- Docker (or Node.js 20+ if running locally)
 
 ## Setup
 
-### 1. Clone and install
-
-```bash
-git clone https://github.com/jasmucrai/truelayer2actual.git
-cd truelayer2actual
-npm install
-```
-
-### 2. Configure environment
+### 1. Configure environment
 
 ```bash
 cp .env.example .env
@@ -76,7 +68,7 @@ ACTUAL_ENCRYPTION_PASSWORD=         # optional — only if E2E encryption is ena
 
 # Sync behaviour
 SYNC_DAYS_LOOKBACK=7      # how many days back to fetch on first run
-SYNC_INTERVAL_HOURS=0     # 0 = one-shot (use external cron); >0 = built-in loop
+SYNC_INTERVAL_HOURS=6     # scheduler interval; 0 = sync once and exit (external cron)
 SETUP_PORT=3000
 
 # Dashboard / notifications (npm run serve)
@@ -87,40 +79,34 @@ NTFY_URL=                 # optional: full ntfy topic URL
 HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL
 ```
 
-> **Important:** `@actual-app/api` must match your Actual server version. If you get an `out-of-sync-migrations` error, run:
-> ```bash
-> npm install @actual-app/api@<your-server-version>
-> ```
+> **Important:** `@actual-app/api` must match your Actual server version. If you get an `out-of-sync-migrations` error, see the [Local setup](#local-setup) section.
 
-### 3. Pair accounts
+### 2. Docker setup
 
-```bash
-npm run setup
+Pull the pre-built image from GitHub Container Registry:
+
+```yaml
+# docker-compose.yml
+services:
+  truelayer2actual:
+    image: ghcr.io/jasmucrai/truelayer2actual:latest
+    container_name: truelayer2actual
+    ports:
+      - "3000:3000"
+    volumes:
+      - /path/to/data:/app/data
+    env_file: .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
 ```
 
-This opens a browser for TrueLayer OAuth, then prompts you to map each bank account/card to an Actual account. Supports multiple banks — you'll be asked after each one if you want to add another.
+See [releases](https://github.com/jasmucrai/truelayer2actual/releases) for available versions.
 
-### 4. Sync
-
-```bash
-npm run sync
-```
-
-On first run it fetches the last `SYNC_DAYS_LOOKBACK` days. Subsequent runs use the last sync timestamp as the start date.
-
-## Docker
-
-### Build and run (always-on, recommended)
-
-```bash
-docker build -t truelayer2actual .
-docker run -d --restart unless-stopped \
-  -p 3000:3000 \
-  -v /path/to/data:/app/data \
-  --env-file .env \
-  truelayer2actual
-```
-
+The container runs the always-on dashboard + sync scheduler (`node dist/commands/serve.js`).
 Open the dashboard at `http://localhost:3000` (or your reverse-proxied host): add banks,
 pair accounts, trigger a sync, and reconnect banks from a browser — no TTY and no
 container restarts. The process runs the Express dashboard and the sync scheduler in a
@@ -130,7 +116,42 @@ When a bank's refresh token dies or its consent is about to expire, the connecti
 flagged `needsReauth` (visible at `/healthz` and on the dashboard), other banks keep
 syncing, and a notification is sent if `NTFY_URL`/`HA_WEBHOOK_URL` is configured.
 
-### One-off sync
+### 3. Pair accounts
+
+Pair the first bank from the dashboard ("Add bank"), or run the CLI setup:
+
+```bash
+docker compose run --rm -p 3000:3000 truelayer2actual node dist/commands/setup.js
+```
+
+> The CLI setup serves the OAuth callback on port 3000 (TrueLayer's redirect target).
+> Stop the always-on container first (`docker compose stop truelayer2actual`) or the
+> port mapping will conflict.
+
+This opens a browser for TrueLayer OAuth, then prompts you to map each bank account/card to an Actual account. Supports multiple banks — you'll be asked after each one if you want to add another.
+
+### 4. Sync
+
+The built-in scheduler syncs every `SYNC_INTERVAL_HOURS` (default 6). To sync manually,
+press **Sync now** on the dashboard, or run:
+
+```bash
+docker compose exec truelayer2actual node dist/commands/sync.js
+```
+
+On first run it fetches the last `SYNC_DAYS_LOOKBACK` days. Subsequent runs use the last sync timestamp as the start date.
+
+> **Note:** `npm run sync` / `npm run setup` / `npm run serve` only work in a source
+> checkout. The Docker image installs production dependencies only — the TypeScript
+> runner (`tsx`) is a dev dependency and is not present, so inside the container always
+> use the compiled scripts (`node dist/commands/sync.js`, etc.).
+
+## Docker
+
+### One-off sync (external cron, no dashboard)
+
+If you prefer external scheduling, run a one-shot sync container instead of the
+always-on default:
 
 ```bash
 docker run --rm \
@@ -149,33 +170,18 @@ docker run --rm -it \
   truelayer2actual node dist/commands/setup.js
 ```
 
-### docker-compose.yml
-
-```yaml
-services:
-  truelayer2actual:
-    image: truelayer2actual:latest
-    container_name: truelayer2actual
-    ports:
-      - "3000:3000"
-    volumes:
-      - /path/to/data:/app/data
-    env_file: .env
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
-      interval: 60s
-      timeout: 5s
-      retries: 3
-```
+Stop any always-on container using the same data volume first — besides the port
+conflict, concurrent setup and sync runs would race on `data/tokens.json`.
 
 ## Scheduling
 
-The sync command supports two modes, controlled by `SYNC_INTERVAL_HOURS` in `.env`:
+`SYNC_INTERVAL_HOURS` in `.env` controls the built-in scheduler (used by the always-on
+container; default 6 when unset). For external scheduling instead, set it to `0` and
+run the one-shot sync from cron:
 
-### Option A: External cron (default, `SYNC_INTERVAL_HOURS=0`)
+### Option A: External cron (`SYNC_INTERVAL_HOURS=0`)
 
-The container starts, syncs once, and exits. Scheduling is handled externally — ideal for Synology Task Scheduler or any cron.
+The container starts, syncs once, and exits. Scheduling is handled externally — ideal for Synology Task Scheduler or any cron. Replace the compose service with the one-shot shape (`restart: "no"`, command `node dist/commands/sync.js`).
 
 **Synology Task Scheduler:**
 
@@ -189,20 +195,11 @@ The container starts, syncs once, and exits. Scheduling is handled externally �
    ```
 5. Enable **"Send run details by email"** and **"Send only when script terminates abnormally"**
 
-### Option B: Built-in loop (`SYNC_INTERVAL_HOURS=6`)
+### Option B: Always-on scheduler (default)
 
-Set `SYNC_INTERVAL_HOURS` to a positive number and the container runs continuously, syncing on that interval. Change `restart: "no"` to `restart: unless-stopped` in `docker-compose.yml`:
-
-```yaml
-services:
-  truelayer2actual:
-    image: truelayer2actual:latest
-    container_name: truelayer2actual
-    volumes:
-      - /volume1/docker/truelayer2actual/data:/app/data
-    env_file: .env
-    restart: unless-stopped
-```
+The container runs the dashboard and syncs every `SYNC_INTERVAL_HOURS` on its own —
+no external cron needed. This is the `docker-compose.yml` shown in the Docker setup
+section above.
 
 ## Sandbox / testing
 
@@ -210,13 +207,38 @@ TrueLayer provides a sandbox environment with a mock bank that returns predictab
 
 1. Create a sandbox app at [console.truelayer.com](https://console.truelayer.com)
 2. Set `TRUELAYER_CLIENT_ID=sandbox-<your-id>` in `.env` — the `sandbox-` prefix is detected automatically and switches all API calls to sandbox endpoints
-3. Run `npm run setup` and authenticate with **Mock Bank**
+3. Run `docker compose run --rm -p 3000:3000 truelayer2actual node dist/commands/setup.js` and authenticate with **Mock Bank** (or add the sandbox bank from the dashboard)
+
+## Local setup
+
+If you need to customize the image or build locally:
+
+```bash
+git clone https://github.com/jasmucrai/truelayer2actual.git
+cd truelayer2actual
+npm install
+npm run build
+docker build -t truelayer2actual .
+```
+
+Then update your `docker-compose.yml`:
+
+```yaml
+services:
+  truelayer2actual:
+    image: truelayer2actual:latest
+    # ... rest of config
+```
 
 ## npm scripts
 
+Available in a source checkout (not in the Docker image — the image ships only
+production dependencies and the compiled `dist/`; use `node dist/commands/<name>.js`
+inside the container):
+
 | Script | Description |
 |---|---|
-| `npm run serve` | Always-on dashboard + sync scheduler (recommended) |
+| `npm run serve` | Always-on dashboard + sync scheduler (what the container runs) |
 | `npm run setup` | One-time OAuth + account pairing (CLI) |
 | `npm run sync` | Sync transactions (one-shot or loop) |
 | `npm run build` | Compile TypeScript to `dist/` |
