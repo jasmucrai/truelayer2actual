@@ -55,7 +55,9 @@ Edit `.env`:
 # Use a sandbox- prefix client ID for testing
 TRUELAYER_CLIENT_ID=
 TRUELAYER_CLIENT_SECRET=
-TRUELAYER_REDIRECT_URI=http://localhost:3000/callback
+# Must be registered in the TrueLayer console AND use the address your BROWSER
+# can reach (NAS IP / Tailscale name — not localhost, unless browsing locally):
+TRUELAYER_REDIRECT_URI=http://192.168.1.73:3000/callback
 
 # Actual Budget
 ACTUAL_SERVER_URL=http://your-nas:5006
@@ -73,7 +75,10 @@ SETUP_PORT=3000
 
 # Dashboard / notifications (npm run serve)
 PORT=3000                 # falls back to SETUP_PORT, then 3000
-DASHBOARD_URL=https://truelayer.example.com
+DASHBOARD_URL=            # public URL of the dashboard (optional): used for
+                          # notification click-links and the CSRF origin check.
+                          # Set it when accessing through a reverse proxy that
+                          # rewrites the Host header.
 REAUTH_WARN_DAYS=14       # warn/notify when consent expires within this many days
 NTFY_URL=                 # optional: full ntfy topic URL
 HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL
@@ -84,7 +89,6 @@ HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL
 ### 2. Docker setup
 
 Pull the pre-built image from GitHub Container Registry:
-
 ```yaml
 # docker-compose.yml
 services:
@@ -116,9 +120,40 @@ When a bank's refresh token dies or its consent is about to expire, the connecti
 flagged `needsReauth` (visible at `/healthz` and on the dashboard), other banks keep
 syncing, and a notification is sent if `NTFY_URL`/`HA_WEBHOOK_URL` is configured.
 
-### 3. Pair accounts
+### 3. Accessing the dashboard
 
-Pair the first bank from the dashboard ("Add bank"), or run the CLI setup:
+The dashboard is a plain HTTP server on port 3000 with no authentication — it is meant
+to be reached from your **local network** (e.g. `http://<nas-ip>:3000`) or through a
+reverse proxy. You do **not** need a domain name: raw LAN IPs and Tailscale/MagicDNS
+names work as-is.
+
+Two settings interact with how you access it:
+
+**`TRUELAYER_REDIRECT_URI`** — the URL TrueLayer sends the browser back to after the
+consent screen. It must match **where your browser runs, not where the container runs**.
+The default (`http://localhost:3000/callback`) only works when the browser is on the
+same machine as the container. If you browse the NAS from a laptop, use:
+
+```env
+TRUELAYER_REDIRECT_URI=http://192.168.1.73:3000/callback
+```
+
+and register that exact URI in the [TrueLayer console](https://console.truelayer.com)
+(Your app → Redirect URIs). TrueLayer rejects redirects to unregistered URIs.
+
+**`DASHBOARD_URL`** — optional. Only needed when you access the dashboard through a
+reverse proxy that rewrites the `Host` header (e.g. Caddy/nginx with a domain name).
+Set it to the public URL. Direct IP, Tailscale, and `localhost` access need it unset.
+
+> **Security:** the dashboard's state-changing routes are unauthenticated at the app
+> level. Keep it LAN-only (don't port-forward 3000) and/or put it behind the Synology
+> reverse proxy with basic auth, or Tailscale. A CSRF origin check rejects browser
+> requests initiated by other sites, but that is defence in depth, not authentication.
+
+### 4. Pair accounts
+
+Pair the first bank from the dashboard ("Add bank") — the redirect URI must already be
+configured per the section above. Alternatively, run the CLI setup:
 
 ```bash
 docker compose run --rm -p 3000:3000 truelayer2actual node dist/commands/setup.js
@@ -130,7 +165,7 @@ docker compose run --rm -p 3000:3000 truelayer2actual node dist/commands/setup.j
 
 This opens a browser for TrueLayer OAuth, then prompts you to map each bank account/card to an Actual account. Supports multiple banks — you'll be asked after each one if you want to add another.
 
-### 4. Sync
+### 5. Sync
 
 The built-in scheduler syncs every `SYNC_INTERVAL_HOURS` (default 6). To sync manually,
 press **Sync now** on the dashboard, or run:

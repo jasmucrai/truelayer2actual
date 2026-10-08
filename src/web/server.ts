@@ -94,30 +94,40 @@ function originAllowed(req: Request): boolean {
 
   const origin = req.headers.origin;
   if (!origin) return true;
+  // `Origin: null` is the opaque origin browsers send when the initiating
+  // context's origin is unknown: sandboxed iframes, cross-origin redirect
+  // chains, some webviews and privacy extensions. It cannot be verified
+  // against any allow-list, so treat it like an absent Origin header — the
+  // same risk class (both are client-controlled) and never a same-origin
+  // browser request. Logged so the trigger is visible in the dashboard logs.
+  if (origin === 'null') {
+    logger.warn('Origin check: opaque Origin "null" — allowing (treated as no-Origin).');
+    return true;
+  }
   let originHost: string;
   try {
     originHost = new URL(origin).host;
   } catch {
+    logger.warn('Origin check: unparseable Origin header:', origin);
     return false;
   }
+  // Same-origin (direct access, or a proxy that preserves Host) is always OK.
+  if (originHost === req.headers.host) {
+    logger.debug(`Origin check: same-origin (${originHost}) — allowed`);
+    return true;
+  }
 
-  // When DASHBOARD_URL is configured, the proxy is expected to forward the
-  // public host. Requiring BOTH the Host header and the Origin to match it
-  // defeats DNS-rebinding (where Origin and Host match each other, but the
-  // attacker controls the resolving domain).
+  // Proxied deployments where the proxy rewrites Host: the real public host
+  // is configured in DASHBOARD_URL and is an additional allowed origin.
   const dashboard = process.env.DASHBOARD_URL;
   if (dashboard) {
-    let dashboardHost: string | undefined;
     try {
-      dashboardHost = new URL(dashboard).host;
+      if (new URL(dashboard).host === originHost) return true;
     } catch {
       // ignore malformed DASHBOARD_URL
     }
-    if (dashboardHost) return originHost === dashboardHost && req.headers.host === dashboardHost;
   }
-
-  // No DASHBOARD_URL: fall back to matching the request's own Host header.
-  return originHost === req.headers.host;
+  return false;
 }
 
 export function createApp(): Express {
@@ -143,7 +153,16 @@ export function createApp(): Express {
 
   app.use((req, res, next) => {
     if (req.method === 'POST' && !originAllowed(req)) {
-      logger.warn('Rejected cross-origin POST:', req.headers.origin ?? '(none)', req.path);
+      logger.warn(
+        'Rejected cross-origin POST:',
+        req.path,
+        JSON.stringify({
+          origin: req.headers.origin ?? '(none)',
+          host: req.headers.host ?? '(none)',
+          secFetchSite: req.headers['sec-fetch-site'] ?? '(none)',
+          dashboardUrl: process.env.DASHBOARD_URL ?? '(unset)',
+        })
+      );
       res
         .status(403)
         .send(messagePage('Forbidden', 'Cross-origin request rejected.', { error: true }));

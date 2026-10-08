@@ -26,6 +26,10 @@ async function main(): Promise<void> {
     'Dashboard is exposed without app-level auth. State-changing routes assume a ' +
       'trusted reverse proxy (Caddy LAN restriction and/or basicauth).'
   );
+  logger.info(
+    `Origin check config: DASHBOARD_URL=${process.env.DASHBOARD_URL ?? '(unset)'} — ` +
+      'POSTs are allowed when Origin matches the request Host, or DASHBOARD_URL.'
+  );
   logger.info(`Sync scheduler running every ${intervalHours} hour(s)`);
 
   let running = false;

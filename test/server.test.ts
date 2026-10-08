@@ -91,10 +91,24 @@ describe('origin check on state-changing POSTs', () => {
     try {
       const res = await request(app, '/pair', {
         method: 'POST',
-        headers: { Origin: 'https://dash.example.com' },
+        headers: { Origin: 'https://other.example.com' },
         body: pairBody,
       });
       assert.equal(res.status, 403);
+    } finally {
+      delete process.env.DASHBOARD_URL;
+    }
+  });
+
+  it('allows an Origin matching DASHBOARD_URL even when Host differs (proxy rewrites Host)', async () => {
+    process.env.DASHBOARD_URL = 'https://dash.example.com';
+    try {
+      const res = await request(app, '/pair', {
+        method: 'POST',
+        headers: { Origin: 'https://dash.example.com', Host: 'internal:3000' },
+        body: pairBody,
+      });
+      assert.notEqual(res.status, 403);
     } finally {
       delete process.env.DASHBOARD_URL;
     }
@@ -109,6 +123,140 @@ describe('origin check on state-changing POSTs', () => {
       body: pairBody,
     });
     assert.notEqual(res.status, 403);
+  });
+
+  it('allows a direct-IP same-origin POST even when DASHBOARD_URL is set to another host', async () => {
+    // Regression: the brief "both Origin and Host must match DASHBOARD_URL"
+    // rule broke browsing via the raw LAN IP while DASHBOARD_URL pointed at a
+    // proxy host. Same-origin (Origin === Host) must always be allowed.
+    process.env.DASHBOARD_URL = 'https://dash.example.com';
+    try {
+      const res = await request(app, '/pair', {
+        method: 'POST',
+        headers: { Origin: 'http://192.168.1.73:3000', Host: '192.168.1.73:3000' },
+        body: pairBody,
+      });
+      assert.notEqual(res.status, 403);
+    } finally {
+      delete process.env.DASHBOARD_URL;
+    }
+  });
+
+  it('allows a raw-IP same-origin POST when DASHBOARD_URL is empty or unset', async () => {
+    for (const value of [undefined, '']) {
+      if (value === undefined) delete process.env.DASHBOARD_URL;
+      else process.env.DASHBOARD_URL = value;
+      try {
+        const res = await request(app, '/pair', {
+          method: 'POST',
+          headers: { Origin: 'http://192.168.1.73:3000', Host: '192.168.1.73:3000' },
+          body: pairBody,
+        });
+        assert.notEqual(res.status, 403, `DASHBOARD_URL=${JSON.stringify(value)}`);
+      } finally {
+        delete process.env.DASHBOARD_URL;
+      }
+    }
+  });
+
+  it('allows a non-standard-port same-origin POST (Origin host includes the port)', async () => {
+    // URL().host includes a non-default port; the comparison must be on the
+    // full host:port, not just the hostname.
+    const res = await request(app, '/pair', {
+      method: 'POST',
+      headers: { Origin: `http://192.168.1.73:${serverAddress.port}`, Host: `192.168.1.73:${serverAddress.port}` },
+      body: pairBody,
+    });
+    assert.notEqual(res.status, 403);
+  });
+
+  it('rejects a same-host-but-different-port Origin (cross-origin)', async () => {
+    const res = await request(app, '/pair', {
+      method: 'POST',
+      headers: { Origin: `http://192.168.1.73:9999`, Host: `192.168.1.73:${serverAddress.port}` },
+      body: pairBody,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('rejects an Origin whose port differs from the Host port', async () => {
+    const res = await request(app, '/pair', {
+      method: 'POST',
+      headers: {
+        Origin: `http://127.0.0.1:${serverAddress.port + 1}`,
+        Host: `127.0.0.1:${serverAddress.port}`,
+      },
+      body: pairBody,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('rejects a malformed Origin header', async () => {
+    const res = await request(app, '/pair', {
+      method: 'POST',
+      headers: { Origin: 'not a url' },
+      body: pairBody,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('rejects Sec-Fetch-Site: cross-site even when Origin would be allowed', async () => {
+    // A forged same-origin-looking Origin with a cross-site Fetch-Metadata
+    // header must still be rejected (Fetch-Metadata is set by the browser and
+    // cannot be stripped by the attacking page's JS).
+    const res = await request(app, '/pair', {
+      method: 'POST',
+      headers: {
+        Origin: `http://127.0.0.1:${serverAddress.port}`,
+        Host: `127.0.0.1:${serverAddress.port}`,
+        'Sec-Fetch-Site': 'cross-site',
+      },
+      body: pairBody,
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('allows Sec-Fetch-Site: same-origin and same-site', async () => {
+    for (const site of ['same-origin', 'same-site']) {
+      const res = await request(app, '/pair', {
+        method: 'POST',
+        headers: {
+          Origin: `http://127.0.0.1:${serverAddress.port}`,
+          'Sec-Fetch-Site': site,
+        },
+        body: pairBody,
+      });
+      assert.notEqual(res.status, 403, `Sec-Fetch-Site: ${site}`);
+    }
+  });
+
+  it('allows an opaque "null" Origin (sandboxed iframe/webview), logging it', async () => {
+    // Browsers send the literal string "null" when the initiating context's
+    // origin is unknowable (sandboxed iframe, cross-origin redirect chain,
+    // some webviews). It cannot be verified against any allow-list, so it is
+    // treated like an absent Origin header.
+    const res = await request(app, '/pair', {
+      method: 'POST',
+      headers: { Origin: 'null' },
+      body: pairBody,
+    });
+    assert.notEqual(res.status, 403);
+  });
+
+  it('allows POSTs to /sync and /connections/:id/reauth with a same-origin Origin', async () => {
+    const syncRes = await request(app, '/sync', {
+      method: 'POST',
+      headers: { Origin: `http://127.0.0.1:${serverAddress.port}` },
+      body: '',
+    });
+    assert.notEqual(syncRes.status, 403);
+
+    const reauthRes = await request(app, '/connections/conn_unknown/reauth', {
+      method: 'POST',
+      headers: { Origin: `http://127.0.0.1:${serverAddress.port}` },
+      body: '',
+    });
+    assert.notEqual(reauthRes.status, 403);
   });
 
   it('allows an Origin matching DASHBOARD_URL when Host matches too', async () => {
