@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { pathToFileURL } from 'url';
-import { loadConfig, updateConfig } from '../config.js';
+import { loadConfig, updateConfig, reauthWarnDays } from '../config.js';
 import {
   loadConnection,
   refreshConnectionIfNeeded,
@@ -48,13 +48,8 @@ function daysAgo(n: number): string {
   return d.toISOString().split('T')[0];
 }
 
-export function dashboardUrl(): string {
-  return process.env.DASHBOARD_URL ?? 'https://truelayer.olane.dev';
-}
-
-function reauthWarnDays(): number {
-  const n = Number(process.env.REAUTH_WARN_DAYS ?? '14');
-  return Number.isFinite(n) && n >= 0 ? n : 14;
+export function dashboardUrl(): string | undefined {
+  return process.env.DASHBOARD_URL;
 }
 
 function connectionLabel(connectionId: string): string {
@@ -226,8 +221,21 @@ export interface SyncSummary {
   errors: { connectionId?: string; account?: string; reason: string }[];
 }
 
+/**
+ * Resolves when the most recent runSync call finishes (or immediately when
+ * none has started). Lets shutdown wait for an in-flight sync — scheduled or
+ * manual — so state files are never cut off mid-write.
+ */
+let lastRun: Promise<unknown> = Promise.resolve();
+
+export function lastSyncSettled(): Promise<unknown> {
+  return lastRun;
+}
+
 export async function runSync(): Promise<SyncSummary> {
-  return withSyncLock(() => runSyncInternal());
+  const run = withSyncLock(() => runSyncInternal());
+  lastRun = run.catch(() => undefined);
+  return run;
 }
 
 async function runSyncInternal(): Promise<SyncSummary> {

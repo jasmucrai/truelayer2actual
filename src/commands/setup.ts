@@ -24,7 +24,7 @@ import {
   getActualAccounts,
   type ActualAccount,
 } from '../clients/actual.js';
-import { loadConfig, saveConfig, mergeAccounts, type Config, type Account } from '../config.js';
+import { loadConfigIfExists, saveConfig, mergeAccounts, type Config, type Account } from '../config.js';
 import { logger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -49,9 +49,9 @@ async function authenticateBank(
   sandbox: boolean,
   bankNumber: number
 ): Promise<{ connectionId: string; tlAccounts: TrueLayerAccount[]; tlCards: TrueLayerCard[] }> {
-  const { server, waitForCode } = await startAuthServer(port);
+  const { server, waitForCode, authState } = await startAuthServer(port);
 
-  const authUrl = buildAuthUrl(clientId, redirectUri, sandbox);
+  const authUrl = buildAuthUrl(clientId, redirectUri, sandbox, authState);
 
   console.log('\n===========================================================');
   console.log(`Bank ${bankNumber}: Open this URL to authenticate:`);
@@ -275,12 +275,19 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Load existing config to preserve lastSyncedAt for re-authenticated accounts
-  let existingConfig: Config | null = null;
+  // Load existing config to preserve lastSyncedAt for re-authenticated accounts.
+  // A config.json that exists but cannot be loaded is a hard error: treating it
+  // as a first run would overwrite it with only the new pairings and then delete
+  // every other bank's tokens.
+  let existingConfig: Config | null;
   try {
-    existingConfig = await loadConfig();
-  } catch {
-    // First run
+    existingConfig = await loadConfigIfExists();
+  } catch (err) {
+    logger.error(
+      'Config file exists but could not be loaded:',
+      err instanceof Error ? err.message : String(err)
+    );
+    process.exit(1);
   }
 
   // Merge: keep existing accounts, overwrite any that were re-paired, append new ones

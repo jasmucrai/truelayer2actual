@@ -71,6 +71,24 @@ describe('refreshConnectionIfNeeded', () => {
     assert.equal(called, false);
   });
 
+  it('does not flip needsReauth on invalid_request (likely malformed request, not a dead grant)', async () => {
+    let called = false;
+    const post = rejectingPost({ status: 400, data: { error: 'invalid_request' } });
+
+    await assert.rejects(
+      () =>
+        refreshConnectionIfNeeded('conn_test', expiredTokens(), {
+          post,
+          persist: () => {
+            called = true;
+          },
+        }),
+      (err: unknown) => !(err instanceof ReauthRequiredError)
+    );
+
+    assert.equal(called, false);
+  });
+
   it('persists only the refreshed fields, leaving metadata untouched', async () => {
     let patch: Partial<Tokens> | undefined;
     const post = (async () => ({

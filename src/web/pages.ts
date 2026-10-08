@@ -103,7 +103,7 @@ export function dashboardPage(data: DashboardData): string {
       return `<div class="conn">
         <div class="conn-header">
           <h2>${escapeHtml(c.provider)}</h2>
-          <span class="badge ${c.status}">${escapeHtml(c.status.replace('_', ' '))}</span>
+          <span class="badge ${escapeHtml(c.status)}">${escapeHtml(c.status.replace('_', ' '))}</span>
         </div>
         <div class="muted">Connection <code>${escapeHtml(c.id)}</code></div>
         <div>Accounts mapped: ${c.accountCount} &middot; Last sync: ${formatDate(c.lastSyncedAt)}</div>
@@ -138,6 +138,7 @@ export interface PairingPageOptions {
   items: PairingItem[];
   actualAccounts: ActualAccount[];
   message?: string;
+  warning?: string;
 }
 
 export function pairingPage(options: PairingPageOptions): string {
@@ -167,7 +168,8 @@ export function pairingPage(options: PairingPageOptions): string {
 
   return layout(
     'Pair accounts',
-    `<h1>Pair ${escapeHtml(options.provider)} accounts</h1>
+    `     <h1>Pair ${escapeHtml(options.provider)} accounts</h1>
+     ${options.warning ? `<div class="error">${escapeHtml(options.warning)}</div>` : ''}
      ${options.message ? `<div class="banner">${escapeHtml(options.message)}</div>` : ''}
      <p>Choose the matching Actual Budget account for each bank account. Leave anything you do not want to import set to "skip".</p>
      <form method="post" action="/pair">

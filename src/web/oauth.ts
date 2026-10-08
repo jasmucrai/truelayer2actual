@@ -17,10 +17,11 @@ import {
 } from '../auth/oauth.js';
 import { generateReauthLink, getMe } from '../clients/truelayer.js';
 import {
-  loadConfig,
+  loadConfigIfExists,
   saveConfig,
   mergeAccounts,
   reconcileConfigAccounts,
+  type Config,
   type Account,
 } from '../config.js';
 import { withStateLock } from '../util/lock.js';
@@ -157,7 +158,7 @@ export async function startReauth(connectionId: string): Promise<ReauthStart> {
 export type CallbackOutcome =
   | { type: 'error'; message: string }
   | { type: 'done'; message: string }
-  | { type: 'pair'; pairingId: string; session: PairingSession };
+  | { type: 'pair'; pairingId: string; session: PairingSession; warning?: string };
 
 export interface CallbackParams {
   code?: string;
@@ -266,17 +267,31 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
   // All shared-state mutation happens here, under the state lock, re-reading
   // config inside the critical section. Network I/O is already done, so the
   // lock is not held across the slow part.
-  const { unmapped } = await withStateLock(async () => {
+  //
+  // A config.json that exists but fails to load is a hard error: treating it
+  // as empty would make `removeStaleConnections` below delete every other
+  // bank's tokens. Tokens are saved before the check so a genuine failure
+  // still keeps the fresh grant.
+  const { unmapped, error: configError } = await withStateLock(async () => {
     const existingTokens = getConnection(connectionId);
     saveConnection(connectionId, existingTokens ? { ...existingTokens, ...tokens } : tokens);
 
-    let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
+    let config: Config | null = null;
     try {
-      config = await loadConfig();
-    } catch {
-      config = null;
+      config = await loadConfigIfExists();
+    } catch (err) {
+      logger.error(
+        'Config file exists but could not be loaded during OAuth callback — ' +
+          'refusing to reconcile or prune connections:',
+        err instanceof Error ? err.message : String(err)
+      );
+      return {
+        unmapped: items,
+        error:
+          'Config file could not be loaded; your bank was connected but existing ' +
+          'account mappings were left untouched. Fix data/config.json and re-pair.',
+      };
     }
-
     if (config) {
       const result = reconcileConfigAccounts(config.accounts, {
         newConnectionId: connectionId,
@@ -304,7 +319,10 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
   });
 
   if (unmapped.length === 0) {
-    return { type: 'done', message: `${provider} is connected.` };
+    return {
+      type: 'done',
+      message: configError ? `${provider} is connected. ${configError}` : `${provider} is connected.`,
+    };
   }
 
   const sessionBase = {
@@ -319,6 +337,7 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
     type: 'pair',
     pairingId,
     session: { ...sessionBase, createdAt: Date.now() },
+    warning: configError,
   };
 }
 
@@ -335,6 +354,25 @@ export async function savePairings(
   mapping: Record<string, string>
 ): Promise<SavePairingsResult> {
   return withStateLock(async () => {
+    // A config.json that exists but fails to load is a hard error: merging
+    // into an empty list would overwrite it with only the incoming pairings
+    // and then delete every other connection's tokens. Check it before
+    // consuming the pairing session, so the user can fix the file and
+    // resubmit without redoing the whole OAuth flow.
+    let existingConfig: Config | null;
+    try {
+      existingConfig = await loadConfigIfExists();
+    } catch (err) {
+      logger.error(
+        'Config file exists but could not be loaded — refusing to save pairings:',
+        err instanceof Error ? err.message : String(err)
+      );
+      throw new Error(
+        'Config file could not be loaded; pairings were not saved. ' +
+          'Fix data/config.json and submit the pairing form again.'
+      );
+    }
+
     const session = consumePairing(pairingId);
     if (!session) {
       throw new Error('Pairing session expired. Start again from the dashboard.');
@@ -352,13 +390,6 @@ export async function savePairings(
         actualAccountId,
         currency: item.currency,
       });
-    }
-
-    let existingConfig: Awaited<ReturnType<typeof loadConfig>> | null = null;
-    try {
-      existingConfig = await loadConfig();
-    } catch {
-      existingConfig = null;
     }
 
     const merged = mergeAccounts(existingConfig?.accounts ?? [], incoming);

@@ -1,6 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import { logger } from '../logger.js';
-import { HTTP_TIMEOUT_MS } from '../util/http.js';
+import { HTTP_TIMEOUT_MS, describeErrorBody } from '../util/http.js';
 
 export interface TrueLayerAccount {
   account_id: string;
@@ -102,7 +102,7 @@ function handleAxiosError(err: unknown, context: string): never {
       );
     }
     throw new Error(
-      `${context}: HTTP ${status ?? 'unknown'} — ${JSON.stringify(body) ?? axiosErr.message}`
+      `${context}: HTTP ${status ?? 'unknown'} — ${describeErrorBody(body) ?? axiosErr.message}`
     );
   }
   throw new Error(
@@ -260,7 +260,7 @@ export async function getMe(accessToken: string): Promise<TrueLayerMe> {
   } catch (err) {
     if (axios.isAxiosError(err) && err.response?.status === 403) {
       throw new ConsentExpiredError(
-        `TrueLayer /me returned 403: ${JSON.stringify(err.response.data)}`
+        `TrueLayer /me returned 403: ${describeErrorBody(err.response.data)}`
       );
     }
     handleAxiosError(err, 'getMe');

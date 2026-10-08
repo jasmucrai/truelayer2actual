@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { startServer } from '../web/server.js';
-import { runSync } from './sync.js';
+import { runSync, lastSyncSettled } from './sync.js';
 import { shutdownActual } from '../clients/actual.js';
 import { logger } from '../logger.js';
 
@@ -60,6 +60,9 @@ async function main(): Promise<void> {
     clearTimeout(initialTimer);
     clearInterval(intervalTimer);
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    // Let an in-flight sync finish (scheduled or manual) so tokens/config are
+    // never left mid-write.
+    await lastSyncSettled();
     await shutdownActual();
     process.exit(0);
   };

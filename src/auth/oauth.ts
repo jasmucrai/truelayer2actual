@@ -7,7 +7,7 @@ import {
   type TrueLayerCard,
 } from '../clients/truelayer.js';
 import type { Tokens } from './tokens.js';
-import { HTTP_TIMEOUT_MS } from '../util/http.js';
+import { HTTP_TIMEOUT_MS, describeErrorBody } from '../util/http.js';
 
 export function requireEnv(name: string): string {
   const value = process.env[name];
@@ -82,7 +82,7 @@ export async function exchangeCodeForTokens(options: ExchangeOptions): Promise<T
   } catch (err) {
     if (axios.isAxiosError(err)) {
       throw new Error(
-        `Token exchange failed: ${err.response?.status ?? 'unknown'} — ${JSON.stringify(err.response?.data)}`
+        `Token exchange failed: ${err.response?.status ?? 'unknown'} — ${describeErrorBody(err.response?.data)}`
       );
     }
     throw err;

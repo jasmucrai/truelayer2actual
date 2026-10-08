@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { logger } from '../logger.js';
 import { atomicWriteFile } from '../util/fs.js';
 import { withStateLock } from '../util/lock.js';
-import { HTTP_TIMEOUT_MS } from '../util/http.js';
+import { HTTP_TIMEOUT_MS, describeErrorBody } from '../util/http.js';
+import { isSandbox, tokenUrl } from './oauth.js';
 
 const TokenSchema = z.object({
   accessToken: z.string(),
@@ -50,41 +51,42 @@ const TokensFileSchema = z.object({
 
 type TokensFile = z.infer<typeof TokensFileSchema>;
 
-const TOKENS_PATH = path.join(process.cwd(), 'data', 'tokens.json');
+// Resolved lazily so tests can point the path at a temp directory before the
+// first call (main code resolves on first use too).
+let tokensPath: string | null = null;
 
-function isSandbox(): boolean {
-  return (process.env.TRUELAYER_CLIENT_ID ?? '').startsWith('sandbox-');
+/** Override where tokens.json is read/written (used by tests). */
+export function setTokensPathForTests(p: string): void {
+  tokensPath = p;
 }
 
-function tokenUrl(): string {
-  return isSandbox()
-    ? 'https://auth.truelayer-sandbox.com/connect/token'
-    : 'https://auth.truelayer.com/connect/token';
+function tokensPathResolve(): string {
+  return (tokensPath ??= path.join(process.cwd(), 'data', 'tokens.json'));
 }
 
 function readTokensFile(): TokensFile {
-  if (!fs.existsSync(TOKENS_PATH)) {
+  if (!fs.existsSync(tokensPathResolve())) {
     return { connections: {} };
   }
   let raw: unknown;
   try {
-    raw = JSON.parse(fs.readFileSync(TOKENS_PATH, 'utf-8'));
+    raw = JSON.parse(fs.readFileSync(tokensPathResolve(), 'utf-8'));
   } catch (err) {
     throw new Error(
-      `Failed to parse tokens file at ${TOKENS_PATH}: ${err instanceof Error ? err.message : String(err)}`
+      `Failed to parse tokens file at ${tokensPathResolve()}: ${err instanceof Error ? err.message : String(err)}`
     );
   }
   const result = TokensFileSchema.safeParse(raw);
   if (!result.success) {
     throw new Error(
-      `Invalid tokens file at ${TOKENS_PATH}: ${result.error.message}. Re-run "npm run setup".`
+      `Invalid tokens file at ${tokensPathResolve()}: ${result.error.message}. Re-run "npm run setup".`
     );
   }
   return result.data;
 }
 
 function writeTokensFile(data: TokensFile): void {
-  atomicWriteFile(TOKENS_PATH, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+  atomicWriteFile(tokensPathResolve(), JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
 }
 
 export function generateConnectionId(): string {
@@ -92,7 +94,7 @@ export function generateConnectionId(): string {
 }
 
 export function saveConnection(connectionId: string, tokens: Tokens): void {
-  const file = fs.existsSync(TOKENS_PATH) ? readTokensFile() : { connections: {} };
+  const file = fs.existsSync(tokensPathResolve()) ? readTokensFile() : { connections: {} };
   file.connections[connectionId] = tokens;
   writeTokensFile(file);
   logger.debug(`Saved connection ${connectionId} to tokens.json`);
@@ -213,7 +215,7 @@ export async function refreshConnectionIfNeeded(
       client_secret: clientSecret,
       refresh_token: tokens.refreshToken,
     });
-    const res = await post<typeof response>(tokenUrl(), params.toString(), {
+    const res = await post<typeof response>(tokenUrl(isSandbox()), params.toString(), {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       timeout: HTTP_TIMEOUT_MS,
     });
@@ -222,10 +224,13 @@ export async function refreshConnectionIfNeeded(
     if (axios.isAxiosError(err)) {
       const status = err.response?.status;
       const error = err.response?.data?.error;
-      // A 4xx that is not a transient/server error means the grant is dead and
-      // a fresh consent is required. 5xx / network errors are retryable and must
-      // NOT flip the connection into reauth-needed.
-      if (status && status >= 400 && status < 500 && (error === 'invalid_grant' || error === 'invalid_request')) {
+      // `invalid_grant` means the refresh token is dead and a fresh consent is
+      // required. Other 4xx codes (e.g. `invalid_request`) are most likely
+      // malformed-request bugs or transient provider quirks — treat them as
+      // retryable errors rather than permanently flagging the connection.
+      // 5xx / network errors are likewise retryable and must NOT flip the
+      // connection into reauth-needed.
+      if (status && status >= 400 && status < 500 && error === 'invalid_grant') {
         logger.error(
           `[${connectionId}] Refresh token is invalid or expired. ` +
             'Re-authenticate from the dashboard to reconnect this bank.'
@@ -239,7 +244,7 @@ export async function refreshConnectionIfNeeded(
       // Everything else (network failure, 5xx, throttling) is retryable.
       throw new Error(
         `Failed to refresh token for ${connectionId}: ` +
-          `${status ?? 'unknown'} — ${JSON.stringify(err.response?.data)}`
+          `${status ?? 'unknown'} — ${describeErrorBody(err.response?.data)}`
       );
     }
     throw err;

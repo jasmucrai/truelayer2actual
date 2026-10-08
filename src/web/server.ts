@@ -6,7 +6,7 @@ import express, {
   type Response,
 } from 'express';
 import { loadAllConnections, getConnection } from '../auth/tokens.js';
-import { loadConfig } from '../config.js';
+import { loadConfigIfExists, reauthWarnDays, type Config } from '../config.js';
 import { withActual, getActualAccounts, getActualError } from '../clients/actual.js';
 import { runSync } from '../commands/sync.js';
 import { startNewAuth, startReauth, processCallback, savePairings } from './oauth.js';
@@ -31,17 +31,12 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function reauthWarnDays(): number {
-  const n = Number(process.env.REAUTH_WARN_DAYS ?? '14');
-  return Number.isFinite(n) && n >= 0 ? n : 14;
-}
-
 async function buildConnectionViews(): Promise<ConnectionView[]> {
   const connections = loadAllConnections();
 
-  let accounts: Awaited<ReturnType<typeof loadConfig>>['accounts'] = [];
+  let accounts: Config['accounts'] = [];
   try {
-    accounts = (await loadConfig()).accounts;
+    accounts = (await loadConfigIfExists())?.accounts ?? [];
   } catch {
     accounts = [];
   }
@@ -87,10 +82,16 @@ function bannerFromQuery(req: Request): { message?: string; error?: string } {
 /**
  * CSRF hardening for the unauthenticated state-changing POST routes: reject
  * requests whose Origin is neither the request host nor DASHBOARD_URL. Requests
- * without an Origin (curl, older clients) are allowed; this is defence in depth
- * on top of the proxy's LAN/basic-auth control, not a substitute for it.
+ * without an Origin (curl, older clients) are allowed; `Sec-Fetch-Site` is used
+ * as an additional signal where the browser provides it. This is defence in
+ * depth on top of the proxy's LAN/basic-auth control, not a substitute for it.
  */
 function originAllowed(req: Request): boolean {
+  // Modern browsers always send this on cross-site requests; `cross-site`
+  // means the initiating page lives on another registrable domain.
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (typeof fetchSite === 'string' && fetchSite === 'cross-site') return false;
+
   const origin = req.headers.origin;
   if (!origin) return true;
   let originHost: string;
@@ -99,21 +100,46 @@ function originAllowed(req: Request): boolean {
   } catch {
     return false;
   }
-  if (originHost === req.headers.host) return true;
+
+  // When DASHBOARD_URL is configured, the proxy is expected to forward the
+  // public host. Requiring BOTH the Host header and the Origin to match it
+  // defeats DNS-rebinding (where Origin and Host match each other, but the
+  // attacker controls the resolving domain).
   const dashboard = process.env.DASHBOARD_URL;
   if (dashboard) {
+    let dashboardHost: string | undefined;
     try {
-      if (new URL(dashboard).host === originHost) return true;
+      dashboardHost = new URL(dashboard).host;
     } catch {
       // ignore malformed DASHBOARD_URL
     }
+    if (dashboardHost) return originHost === dashboardHost && req.headers.host === dashboardHost;
   }
-  return false;
+
+  // No DASHBOARD_URL: fall back to matching the request's own Host header.
+  return originHost === req.headers.host;
 }
 
 export function createApp(): Express {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
+
+  // Basic hardening headers on every response. Pages are fully server-rendered
+  // with no scripts or third-party resources, so `default-src 'none'` is safe.
+  // Pages reflect query banners, so intermediaries must not cache them.
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
+    if (!req.path.startsWith('/healthz')) {
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
+      );
+    }
+    next();
+  });
 
   app.use((req, res, next) => {
     if (req.method === 'POST' && !originAllowed(req)) {
@@ -139,9 +165,9 @@ export function createApp(): Express {
     asyncHandler(async (_req, res) => {
       try {
         const connections = loadAllConnections();
-        const view = Object.entries(connections).map(([id, tokens]) => ({
-          id,
-          provider: tokens.providerDisplayName ?? tokens.providerId ?? null,
+        // Minimal shape: health signals only, no provider names or ids —
+        // this endpoint is unauthenticated.
+        const view = Object.values(connections).map((tokens) => ({
           needsReauth: Boolean(tokens.needsReauth),
           consentExpiresAt: tokens.consentExpiresAt ?? null,
         }));
@@ -157,7 +183,6 @@ export function createApp(): Express {
         res.status(200).json({
           status: 'degraded',
           connections: [],
-          error: err instanceof Error ? err.message : String(err),
         });
       }
     })
@@ -212,6 +237,7 @@ export function createApp(): Express {
             outcome.session.mode === 'reauth'
               ? 'Reconnected. Confirm any new accounts below.'
               : undefined,
+          warning: outcome.warning,
         })
       );
     })

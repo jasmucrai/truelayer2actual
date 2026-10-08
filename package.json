@@ -11,7 +11,7 @@
     "start:setup": "node dist/commands/setup.js",
     "start:sync": "node dist/commands/sync.js",
     "start:serve": "node dist/commands/serve.js",
-    "test": "node --import tsx/esm --test test/**/*.test.ts"
+    "test": "node --import tsx/esm --test test/*.test.ts"
   },
   "dependencies": {
     "@actual-app/api": "latest",

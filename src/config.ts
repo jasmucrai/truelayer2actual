@@ -23,23 +23,40 @@ const ConfigSchema = z.object({
 export type Account = z.infer<typeof AccountSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
-const CONFIG_PATH = path.join(process.cwd(), 'data', 'config.json');
+// Resolved lazily so tests can point the path at a temp directory before the
+// first call (main code resolves on first use too).
+let configPath: string | null = null;
+
+/** Override where config.json is read/written (used by tests). */
+export function setConfigPathForTests(p: string): void {
+  configPath = p;
+}
+
+function configPathResolve(): string {
+  return (configPath ??= path.join(process.cwd(), 'data', 'config.json'));
+}
+
+/** Consent-expiry warning threshold in days (REAUTH_WARN_DAYS, default 14). */
+export function reauthWarnDays(): number {
+  const n = Number(process.env.REAUTH_WARN_DAYS ?? '14');
+  return Number.isFinite(n) && n >= 0 ? n : 14;
+}
 
 export async function loadConfig(): Promise<Config> {
-  if (!fs.existsSync(CONFIG_PATH)) {
+  if (!fs.existsSync(configPathResolve())) {
     throw new Error(
-      `Config file not found at ${CONFIG_PATH}. ` +
+      `Config file not found at ${configPathResolve()}. ` +
         'Please run "npm run setup" first to create an account mapping.'
     );
   }
 
   let raw: unknown;
   try {
-    const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+    const content = fs.readFileSync(configPathResolve(), 'utf-8');
     raw = JSON.parse(content);
   } catch (err) {
     throw new Error(
-      `Failed to read or parse config file at ${CONFIG_PATH}: ${
+      `Failed to read or parse config file at ${configPathResolve()}: ${
         err instanceof Error ? err.message : String(err)
       }`
     );
@@ -48,7 +65,7 @@ export async function loadConfig(): Promise<Config> {
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
     throw new Error(
-      `Invalid config file at ${CONFIG_PATH}: ${result.error.message}`
+      `Invalid config file at ${configPathResolve()}: ${result.error.message}`
     );
   }
 
@@ -62,8 +79,10 @@ export async function saveConfig(config: Config): Promise<void> {
     throw new Error(`Cannot save invalid config: ${result.error.message}`);
   }
 
-  atomicWriteFile(CONFIG_PATH, JSON.stringify(result.data, null, 2) + '\n');
-  logger.debug(`Saved config to ${CONFIG_PATH}`);
+  // Bank account names and TrueLayer account ids — treat as sensitive
+  // (tokens.json is 0600; config carries no secrets but is personal data).
+  atomicWriteFile(configPathResolve(), JSON.stringify(result.data, null, 2) + '\n', { mode: 0o600 });
+  logger.debug(`Saved config to ${configPathResolve()}`);
 }
 
 /**
@@ -84,6 +103,17 @@ export function mergeAccounts(existing: Account[], incoming: Account[]): Account
     }
   }
   return merged;
+}
+
+/**
+ * Load config.json only if it exists, returning `null` otherwise. A file that
+ * exists but cannot be read/parsed still throws — callers must never treat a
+ * corrupt config as an empty one, or they risk wiping other connections'
+ * mappings and tokens.
+ */
+export async function loadConfigIfExists(): Promise<Config | null> {
+  if (!fs.existsSync(configPathResolve())) return null;
+  return loadConfig();
 }
 
 /**
