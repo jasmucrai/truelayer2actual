@@ -4,6 +4,7 @@ import { runSync, lastSyncSettled } from './sync.js';
 import { shutdownActual } from '../clients/actual.js';
 import { logger } from '../logger.js';
 import { describeError } from '../util/errors.js';
+import { syncIntervalHours } from '../config.js';
 
 function resolvePort(): number {
   const raw = process.env.PORT ?? process.env.SETUP_PORT ?? '3000';
@@ -11,25 +12,20 @@ function resolvePort(): number {
   return Number.isFinite(port) && port > 0 ? port : 3000;
 }
 
-function resolveIntervalHours(): number {
-  const raw = Number(process.env.SYNC_INTERVAL_HOURS ?? '0');
-  if (Number.isFinite(raw) && raw > 0) return raw;
-  // Always-on default; set SYNC_INTERVAL_HOURS to override.
-  return 6;
-}
-
 async function main(): Promise<void> {
   const port = resolvePort();
   const server = await startServer(port);
-  const intervalHours = resolveIntervalHours();
+  const intervalHours = syncIntervalHours();
 
   logger.warn(
     'Dashboard is exposed without app-level auth. State-changing routes assume a ' +
       'trusted reverse proxy (Caddy LAN restriction and/or basicauth).'
   );
   logger.info(
-    `Origin check config: DASHBOARD_URL=${process.env.DASHBOARD_URL ?? '(unset)'} — ` +
-      'POSTs are allowed when Origin matches the request Host, or DASHBOARD_URL.'
+    `Host/origin check config: DASHBOARD_URL=${process.env.DASHBOARD_URL ?? '(unset)'}, ` +
+      `ALLOWED_HOSTS=${process.env.ALLOWED_HOSTS ?? '(unset)'} — requests must use an IP, ` +
+      'localhost, a LAN/Tailscale name or an allowed host; POSTs must also be same-origin ' +
+      'or come from DASHBOARD_URL.'
   );
   logger.info(`Sync scheduler running every ${intervalHours} hour(s)`);
 

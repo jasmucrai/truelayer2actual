@@ -1,4 +1,5 @@
 import http from 'http';
+import net from 'net';
 import express, {
   type Express,
   type NextFunction,
@@ -79,6 +80,44 @@ function bannerFromQuery(req: Request): { message?: string; error?: string } {
   };
 }
 
+// Name suffixes that only resolve on a LAN / tailnet, so an attacker's public
+// domain can never produce them. Single-label names (`nas`) are also allowed.
+const PRIVATE_NAME_SUFFIXES = ['.local', '.lan', '.home.arpa', '.internal', '.localhost', '.ts.net'];
+
+function hostnameOf(value: string): string | undefined {
+  try {
+    const url = new URL(value.includes('://') ? value : `http://${value}`);
+    return url.hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * DNS-rebinding defence: only serve requests whose Host header names this box
+ * the way a LAN user would — an IP literal, `localhost`, a single-label or
+ * LAN/Tailscale name, the DASHBOARD_URL host, or an entry in ALLOWED_HOSTS
+ * (comma-separated). A rebinding page on an attacker's domain sends that
+ * domain as Host (and matching Origin), so it is rejected here before the
+ * origin check, which it would otherwise pass as "same-origin".
+ */
+export function hostAllowed(hostHeader: string | undefined): boolean {
+  // Browsers always send Host; only non-browser HTTP/1.0 clients omit it.
+  if (!hostHeader) return true;
+  const hostname = hostnameOf(hostHeader);
+  if (!hostname) return false;
+
+  if (net.isIP(hostname.replace(/^\[|\]$/g, ''))) return true;
+  if (hostname === 'localhost' || !hostname.includes('.')) return true;
+  if (PRIVATE_NAME_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) return true;
+
+  const extra = [process.env.DASHBOARD_URL ?? '', ...(process.env.ALLOWED_HOSTS ?? '').split(',')]
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map(hostnameOf);
+  return extra.includes(hostname);
+}
+
 /**
  * CSRF hardening for the unauthenticated state-changing POST routes: reject
  * requests whose Origin is neither the request host nor DASHBOARD_URL. Requests
@@ -94,15 +133,13 @@ function originAllowed(req: Request): boolean {
 
   const origin = req.headers.origin;
   if (!origin) return true;
-  // `Origin: null` is the opaque origin browsers send when the initiating
-  // context's origin is unknown: sandboxed iframes, cross-origin redirect
-  // chains, some webviews and privacy extensions. It cannot be verified
-  // against any allow-list, so treat it like an absent Origin header — the
-  // same risk class (both are client-controlled) and never a same-origin
-  // browser request. Logged so the trigger is visible in the dashboard logs.
+  // `Origin: null` is the opaque origin browsers send for sandboxed iframes,
+  // cross-origin redirect chains and some webviews. A form on this dashboard
+  // never produces it, and it is exactly what a sandboxed attacker iframe
+  // sends, so reject it rather than treating it like an absent header.
   if (origin === 'null') {
-    logger.warn('Origin check: opaque Origin "null" — allowing (treated as no-Origin).');
-    return true;
+    logger.warn('Origin check: opaque Origin "null" — rejecting.');
+    return false;
   }
   let originHost: string;
   try {
@@ -149,6 +186,27 @@ export function createApp(): Express {
       );
     }
     next();
+  });
+
+  // Host allow-list runs first (see hostAllowed). /healthz is exempt so
+  // container/orchestrator health checks work whatever Host they send; it
+  // exposes no identifiers.
+  app.use((req, res, next) => {
+    if (req.path === '/healthz' || hostAllowed(req.headers.host)) {
+      next();
+      return;
+    }
+    logger.warn('Rejected request with unrecognised Host header:', req.headers.host ?? '(none)', req.path);
+    res
+      .status(403)
+      .send(
+        messagePage(
+          'Forbidden',
+          `Host "${req.headers.host ?? ''}" is not allowed. If this is how you reach the ` +
+            'dashboard, add it to ALLOWED_HOSTS (or set DASHBOARD_URL).',
+          { error: true }
+        )
+      );
   });
 
   app.use((req, res, next) => {

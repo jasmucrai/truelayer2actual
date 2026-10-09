@@ -18,5 +18,5 @@ VOLUME ["/app/data"]
 EXPOSE 3000
 # Always-on: Express dashboard + sync scheduler in one process.
 # For one-shot sync (external cron), override the command:
-#   docker run ... truelayer2actual node dist/commands/sync.js
+#   docker run ... -e SYNC_INTERVAL_HOURS=0 truelayer2actual node dist/commands/sync.js
 CMD ["node", "dist/commands/serve.js"]

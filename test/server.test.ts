@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'http';
 import { once } from 'events';
 import type { Express } from 'express';
-import { createApp } from '../src/web/server.js';
+import { createApp, hostAllowed } from '../src/web/server.js';
 
 interface Res {
   status: number;
@@ -230,17 +230,15 @@ describe('origin check on state-changing POSTs', () => {
     }
   });
 
-  it('allows an opaque "null" Origin (sandboxed iframe/webview), logging it', async () => {
-    // Browsers send the literal string "null" when the initiating context's
-    // origin is unknowable (sandboxed iframe, cross-origin redirect chain,
-    // some webviews). It cannot be verified against any allow-list, so it is
-    // treated like an absent Origin header.
+  it('rejects an opaque "null" Origin (sandboxed iframe/webview)', async () => {
+    // A sandboxed attacker iframe sends the literal "null"; the dashboard's own
+    // forms never do, so it must not be treated like an absent Origin.
     const res = await request(app, '/pair', {
       method: 'POST',
       headers: { Origin: 'null' },
       body: pairBody,
     });
-    assert.notEqual(res.status, 403);
+    assert.equal(res.status, 403);
   });
 
   it('allows POSTs to /sync and /connections/:id/reauth with a same-origin Origin', async () => {
@@ -295,5 +293,67 @@ describe('GET /healthz', () => {
         );
       }
     }
+  });
+});
+
+describe('Host allow-list (DNS-rebinding defence)', () => {
+  it('allows IP literals, localhost, LAN and Tailscale names', () => {
+    for (const host of [
+      '127.0.0.1:3000',
+      '192.168.1.73:3000',
+      '[::1]:3000',
+      'localhost:3000',
+      'nas:3000',
+      'diskstation.local:3000',
+      'nas.home.arpa',
+      'nas.tail1234.ts.net',
+      'NAS.LOCAL.',
+    ]) {
+      assert.equal(hostAllowed(host), true, host);
+    }
+  });
+
+  it('rejects public domain names that are not configured', () => {
+    for (const host of ['evil.example.com', 'evil.example.com:3000', 'localhost.evil.com', 'local.evil.com']) {
+      assert.equal(hostAllowed(host), false, host);
+    }
+  });
+
+  it('allows the DASHBOARD_URL host and ALLOWED_HOSTS entries', () => {
+    process.env.DASHBOARD_URL = 'https://dash.example.com';
+    process.env.ALLOWED_HOSTS = ' budget.example.org , other.example.net:8443 ';
+    try {
+      assert.equal(hostAllowed('dash.example.com'), true);
+      assert.equal(hostAllowed('budget.example.org:3000'), true);
+      assert.equal(hostAllowed('other.example.net'), true);
+      assert.equal(hostAllowed('evil.example.com'), false);
+    } finally {
+      delete process.env.DASHBOARD_URL;
+      delete process.env.ALLOWED_HOSTS;
+    }
+  });
+
+  it('rejects a rebinding page: GET / with a foreign Host', async () => {
+    const res = await request(app, '/', { headers: { Host: 'rebind.attacker.example:3000' } });
+    assert.equal(res.status, 403);
+    assert.doesNotMatch(res.body, /Add bank/);
+  });
+
+  it('rejects a rebinding POST even when Origin matches its Host', async () => {
+    const res = await request(app, '/sync', {
+      method: 'POST',
+      headers: {
+        Host: 'rebind.attacker.example:3000',
+        Origin: 'http://rebind.attacker.example:3000',
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      body: '',
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('keeps /healthz reachable whatever the Host', async () => {
+    const res = await request(app, '/healthz', { headers: { Host: 'anything.example.com' } });
+    assert.equal(res.status, 200);
   });
 });

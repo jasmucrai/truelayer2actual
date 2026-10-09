@@ -1,15 +1,49 @@
+# Always-on dashboard + sync scheduler (the image's default command).
+#
+# For one-shot syncs from an external scheduler (e.g. Synology Task Scheduler),
+# don't run this service as well — run the sync command explicitly instead:
+#   docker compose run --rm -e SYNC_INTERVAL_HOURS=0 truelayer2actual node dist/commands/sync.js
+# See README → Scheduling.
+#
+# Values are read from .env next to this file (or the shell / Container Manager
+# environment). Unset optional values become empty strings; defaults are given
+# where an empty value would otherwise be read as 0.
 services:
   truelayer2actual:
-    image: yourname/actualsync:latest
+    image: ghcr.io/jasmucrai/truelayer2actual:latest
     container_name: truelayer2actual
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
     volumes:
       - /volume1/docker/truelayer2actual/data:/app/data
     environment:
+      # TrueLayer (required)
       - TRUELAYER_CLIENT_ID=${TRUELAYER_CLIENT_ID}
       - TRUELAYER_CLIENT_SECRET=${TRUELAYER_CLIENT_SECRET}
       - TRUELAYER_REDIRECT_URI=${TRUELAYER_REDIRECT_URI}
+      # Actual Budget (required, except the encryption password)
       - ACTUAL_SERVER_URL=${ACTUAL_SERVER_URL}
       - ACTUAL_PASSWORD=${ACTUAL_PASSWORD}
       - ACTUAL_SYNC_ID=${ACTUAL_SYNC_ID}
+      - ACTUAL_ENCRYPTION_PASSWORD=${ACTUAL_ENCRYPTION_PASSWORD}
+      # - NODE_TLS_REJECT_UNAUTHORIZED=0   # only if Actual uses a self-signed cert
+      # Sync behaviour
       - SYNC_DAYS_LOOKBACK=${SYNC_DAYS_LOOKBACK:-7}
-    restart: "no"
+      - SYNC_INTERVAL_HOURS=${SYNC_INTERVAL_HOURS:-6}
+      # Dashboard
+      - PORT=${PORT:-3000}
+      - SETUP_PORT=${SETUP_PORT:-3000}
+      - DASHBOARD_URL=${DASHBOARD_URL}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS}
+      - REAUTH_WARN_DAYS=${REAUTH_WARN_DAYS:-14}
+      # Notifications (optional)
+      - NTFY_URL=${NTFY_URL}
+      - HA_WEBHOOK_URL=${HA_WEBHOOK_URL}
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-3000}/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
