@@ -68,6 +68,9 @@ ACTUAL_ENCRYPTION_PASSWORD=         # optional — only if E2E encryption is ena
 # If Actual uses a self-signed certificate:
 # NODE_TLS_REJECT_UNAUTHORIZED=0
 
+# Logging
+LOG_LEVEL=info            # debug | info | warn | error
+
 # Sync behaviour
 SYNC_DAYS_LOOKBACK=7      # how many days back to fetch on first run
 SYNC_INTERVAL_HOURS=6     # scheduler interval; 0 = sync once and exit (external cron)
@@ -180,6 +183,19 @@ On first run it fetches the last `SYNC_DAYS_LOOKBACK` days. Subsequent runs use 
 > checkout. The Docker image installs production dependencies only — the TypeScript
 > runner (`tsx`) is a dev dependency and is not present, so inside the container always
 > use the compiled scripts (`node dist/commands/sync.js`, etc.).
+
+### Troubleshooting
+
+- **`invalid_client` during setup** — `TRUELAYER_CLIENT_ID`/`SECRET` don't match the
+  TrueLayer app, or `TRUELAYER_REDIRECT_URI` isn't registered on the app *exactly*
+  (scheme, host, port, path). The log line printed with the failure shows the exact
+  client id and redirect URI that were used.
+- **`invalid-schema` / `out-of-sync-migrations` at sync** — `@actual-app/api` and your
+  Actual server version have diverged. Open Actual in the browser, let it finish
+  migrating, then retry. If it persists, pin `@actual-app/api` to the same version as
+  your Actual server and rebuild.
+- **Sync/sync-now does nothing visible** — set `LOG_LEVEL=debug` for per-request
+  detail, including why the CSRF origin check allowed or rejected a request.
 
 ## Docker
 

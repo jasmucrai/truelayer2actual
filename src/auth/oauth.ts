@@ -8,6 +8,8 @@ import {
 } from '../clients/truelayer.js';
 import type { Tokens } from './tokens.js';
 import { HTTP_TIMEOUT_MS, describeErrorBody } from '../util/http.js';
+import { describeError } from '../util/errors.js';
+import { logger } from '../logger.js';
 
 export function requireEnv(name: string): string {
   const value = process.env[name];
@@ -74,6 +76,10 @@ export async function exchangeCodeForTokens(options: ExchangeOptions): Promise<T
       redirect_uri: redirectUri,
       code,
     });
+    logger.info(
+      `Exchanging authorization code for tokens at ${tokenUrl(sandbox)} ` +
+        `(client_id=${clientId}, redirect_uri=${redirectUri})`
+    );
     const res = await axios.post<typeof data>(tokenUrl(sandbox), params.toString(), {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       timeout: HTTP_TIMEOUT_MS,
@@ -81,11 +87,18 @@ export async function exchangeCodeForTokens(options: ExchangeOptions): Promise<T
     data = res.data;
   } catch (err) {
     if (axios.isAxiosError(err)) {
-      throw new Error(
-        `Token exchange failed: ${err.response?.status ?? 'unknown'} — ${describeErrorBody(err.response?.data)}`
+      const status = err.response?.status ?? 'unknown';
+      const body = describeErrorBody(err.response?.data);
+      logger.error(
+        `Token exchange failed: HTTP ${status} — ${body}. ` +
+          `Check TRUELAYER_CLIENT_ID/SECRET against console.truelayer.com, and that ` +
+          `TRUELAYER_REDIRECT_URI (${redirectUri}) exactly matches a redirect URI ` +
+          `registered on the app. ("invalid_client" = wrong id/secret; ` +
+          `"invalid_grant" = code expired or redirect_uri mismatch).`
       );
+      throw new Error(`Token exchange failed: ${status} — ${body}`);
     }
-    throw err;
+    throw new Error(`Token exchange failed: ${describeError(err)}`);
   }
 
   const refreshToken = data.refresh_token ?? fallbackRefreshToken;
