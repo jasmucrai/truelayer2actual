@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import * as api from '@actual-app/api';
 import { logger } from '../logger.js';
@@ -87,6 +88,36 @@ export interface ImportResult {
   errors?: string[];
 }
 
+/**
+ * Installed @actual-app/api version, for compatibility triage in logs.
+ *
+ * The package is ESM-built here (so bare `require` is undefined) and its
+ * `exports` map does not expose `./package.json`, so resolve the entry point
+ * and walk up to the package's own package.json instead. Never throws.
+ */
+export function actualApiVersion(): string {
+  try {
+    const resolve = createRequire(import.meta.url).resolve;
+    let dir = path.dirname(resolve('@actual-app/api'));
+    for (let i = 0; i < 6; i++) {
+      const pkgPath = path.join(dir, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as {
+          name?: string;
+          version?: string;
+        };
+        if (pkg.name === '@actual-app/api' && pkg.version) return pkg.version;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    // fall through
+  }
+  return 'unknown';
+}
+
 export async function initActual(): Promise<void> {
   if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -135,15 +166,7 @@ export async function initActual(): Promise<void> {
       'Actual budget download failed (full):',
       detail,
       '— @actual-app/api version:',
-      // Best-effort version reporting for compatibility triage.
-      (() => {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          return require('@actual-app/api/package.json').version;
-        } catch {
-          return 'unknown';
-        }
-      })()
+      actualApiVersion()
     );
     if (detail.includes('out-of-sync-migrations') || detail.includes('invalid-schema') || detail.includes('migration')) {
       throw new ActualCompatibilityError(

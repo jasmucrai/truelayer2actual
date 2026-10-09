@@ -73,7 +73,7 @@ LOG_LEVEL=info            # debug | info | warn | error
 
 # Sync behaviour
 SYNC_DAYS_LOOKBACK=7      # how many days back to fetch on first run
-SYNC_INTERVAL_HOURS=6     # scheduler interval; 0 = sync once and exit (external cron)
+SYNC_INTERVAL_HOURS=6     # always-on scheduler interval (0 or unset = 6); for sync.js, 0 = sync once and exit
 SETUP_PORT=3000
 
 # Dashboard / notifications (npm run serve)
@@ -82,6 +82,8 @@ DASHBOARD_URL=            # public URL of the dashboard (optional): used for
                           # notification click-links and the CSRF origin check.
                           # Set it when accessing through a reverse proxy that
                           # rewrites the Host header.
+ALLOWED_HOSTS=            # optional: extra hostnames for the dashboard, comma-separated
+                          # (IPs, localhost, .local/.lan/.home.arpa/.ts.net always work)
 REAUTH_WARN_DAYS=14       # warn/notify when consent expires within this many days
 NTFY_URL=                 # optional: full ntfy topic URL
 HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL
@@ -148,6 +150,12 @@ and register that exact URI in the [TrueLayer console](https://console.truelayer
 reverse proxy that rewrites the `Host` header (e.g. Caddy/nginx with a domain name).
 Set it to the public URL. Direct IP, Tailscale, and `localhost` access need it unset.
 
+**`ALLOWED_HOSTS`** — optional. To block DNS-rebinding attacks the dashboard only answers
+requests addressed to an IP, `localhost`, a single-label name (`nas`), a `.local`, `.lan`,
+`.home.arpa` or `.ts.net` name, or the `DASHBOARD_URL` host. If you reach it by any other
+hostname (e.g. your own domain with a proxy that preserves `Host`), list it here,
+comma-separated. Anything else gets a 403 naming the rejected host.
+
 > **Security:** the dashboard's state-changing routes are unauthenticated at the app
 > level. Keep it LAN-only (don't port-forward 3000) and/or put it behind the Synology
 > reverse proxy with basic auth, or Tailscale. A CSRF origin check rejects browser
@@ -171,11 +179,16 @@ This opens a browser for TrueLayer OAuth, then prompts you to map each bank acco
 ### 5. Sync
 
 The built-in scheduler syncs every `SYNC_INTERVAL_HOURS` (default 6). To sync manually,
-press **Sync now** on the dashboard, or run:
+press **Sync now** on the dashboard, or trigger the same thing from the shell:
 
 ```bash
-docker compose exec truelayer2actual node dist/commands/sync.js
+docker compose exec truelayer2actual wget -qO- --post-data= http://localhost:3000/sync
 ```
+
+(This goes through the running process, so it can't overlap a scheduled sync. Avoid
+`docker compose exec … node dist/commands/sync.js` alongside the dashboard: it is a
+second process racing on `data/tokens.json`, and with `SYNC_INTERVAL_HOURS` set it
+loops instead of exiting.)
 
 On first run it fetches the last `SYNC_DAYS_LOOKBACK` days. Subsequent runs use the last sync timestamp as the start date.
 
@@ -208,6 +221,7 @@ always-on default:
 docker run --rm \
   -v /path/to/data:/app/data \
   --env-file .env \
+  -e SYNC_INTERVAL_HOURS=0 \
   truelayer2actual node dist/commands/sync.js
 ```
 
@@ -226,13 +240,18 @@ conflict, concurrent setup and sync runs would race on `data/tokens.json`.
 
 ## Scheduling
 
-`SYNC_INTERVAL_HOURS` in `.env` controls the built-in scheduler (used by the always-on
-container; default 6 when unset). For external scheduling instead, set it to `0` and
-run the one-shot sync from cron:
+`SYNC_INTERVAL_HOURS` in `.env` controls the built-in scheduler of the always-on
+container (default 6; `0` is treated as unset there, with a warning in the log).
+`0` only means "sync once and exit" for the one-shot `node dist/commands/sync.js` command.
 
-### Option A: External cron (`SYNC_INTERVAL_HOURS=0`)
+> **Upgrading from the one-shot image:** the image's default command is now the
+> always-on dashboard (`serve.js`), not a one-shot sync. A scheduled
+> `docker compose run --rm truelayer2actual` with no command would now start a
+> dashboard that never exits — add `node dist/commands/sync.js` as shown below.
 
-The container starts, syncs once, and exits. Scheduling is handled externally — ideal for Synology Task Scheduler or any cron. Replace the compose service with the one-shot shape (`restart: "no"`, command `node dist/commands/sync.js`).
+### Option A: External cron (one-shot)
+
+The container starts, syncs once, and exits. Scheduling is handled externally — ideal for Synology Task Scheduler or any cron. Pass the sync command explicitly, and don't also run the always-on service against the same data folder (two processes would sync concurrently and race on `data/tokens.json`).
 
 **Synology Task Scheduler:**
 
@@ -242,8 +261,10 @@ The container starts, syncs once, and exits. Scheduling is handled externally �
 4. Script:
    ```bash
    docker compose -f /volume1/docker/truelayer2actual/docker-compose.yml \
-     run --rm truelayer2actual
+     run --rm -e SYNC_INTERVAL_HOURS=0 truelayer2actual node dist/commands/sync.js
    ```
+
+   (`-e SYNC_INTERVAL_HOURS=0` makes the run exit after one sync even if your `.env` sets an interval for the always-on container.)
 5. Enable **"Send run details by email"** and **"Send only when script terminates abnormally"**
 
 ### Option B: Always-on scheduler (default)

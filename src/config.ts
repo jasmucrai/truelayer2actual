@@ -42,6 +42,43 @@ export function reauthWarnDays(): number {
   return Number.isFinite(n) && n >= 0 ? n : 14;
 }
 
+export const DEFAULT_SYNC_INTERVAL_HOURS = 6;
+// setInterval overflows (and fires almost immediately) above 2^31-1 ms ≈ 596 h.
+export const MAX_SYNC_INTERVAL_HOURS = Math.floor((2 ** 31 - 1) / 3_600_000);
+
+/**
+ * Scheduler interval for the always-on `serve` process (SYNC_INTERVAL_HOURS).
+ *
+ * `0` means "one-shot" only for `node dist/commands/sync.js`; the always-on
+ * process ignores it and uses the default rather than silently stopping
+ * scheduled syncs. Invalid or out-of-range values fall back with a warning.
+ */
+export function syncIntervalHours(raw = process.env.SYNC_INTERVAL_HOURS): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_SYNC_INTERVAL_HOURS;
+  const n = Number(raw);
+  if (n === 0) {
+    logger.warn(
+      'SYNC_INTERVAL_HOURS=0 only means one-shot for `node dist/commands/sync.js`. ' +
+        `The always-on dashboard ignores it and syncs every ${DEFAULT_SYNC_INTERVAL_HOURS} hour(s); ` +
+        'set a positive value to change the interval.'
+    );
+    return DEFAULT_SYNC_INTERVAL_HOURS;
+  }
+  if (!Number.isFinite(n) || n < 0) {
+    logger.warn(
+      `Invalid SYNC_INTERVAL_HOURS="${raw}" — using ${DEFAULT_SYNC_INTERVAL_HOURS} hour(s).`
+    );
+    return DEFAULT_SYNC_INTERVAL_HOURS;
+  }
+  if (n > MAX_SYNC_INTERVAL_HOURS) {
+    logger.warn(
+      `SYNC_INTERVAL_HOURS=${raw} exceeds the timer limit — using ${MAX_SYNC_INTERVAL_HOURS} hour(s).`
+    );
+    return MAX_SYNC_INTERVAL_HOURS;
+  }
+  return n;
+}
+
 export async function loadConfig(): Promise<Config> {
   if (!fs.existsSync(configPathResolve())) {
     throw new Error(
