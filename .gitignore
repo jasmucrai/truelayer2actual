@@ -1,6 +1,17 @@
 node_modules/
 dist/
 .env
+.env.*
 data/*
 !data/.gitkeep
 *.js.map
+
+# OS and editor junk
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+npm-debug.log*
+*.log
+coverage/
