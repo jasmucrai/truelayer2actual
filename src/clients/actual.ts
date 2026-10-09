@@ -6,6 +6,64 @@ import { logger } from '../logger.js';
 
 const CACHE_DIR = path.join(process.cwd(), 'data', 'actual-cache');
 
+// ---------------------------------------------------------------------------
+// Serialised access to the Actual Budget API.
+//
+// @actual-app/api keeps a single in-process cache, so the sync scheduler and
+// the web pairing UI must never touch it concurrently. Every call goes through
+// `withActual`, which chains onto a promise queue.
+// ---------------------------------------------------------------------------
+
+let actualReady = false;
+let actualQueue: Promise<unknown> = Promise.resolve();
+let lastActualError: string | null = null;
+
+export class ActualCompatibilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ActualCompatibilityError';
+  }
+}
+
+export function isActualReady(): boolean {
+  return actualReady;
+}
+
+/** Last error from initialising Actual, surfaced via /healthz. */
+export function getActualError(): string | null {
+  return lastActualError;
+}
+
+/** Initialise the Actual connection once; safe to call repeatedly. */
+export async function ensureActual(): Promise<void> {
+  if (actualReady) return;
+  try {
+    await initActual();
+    actualReady = true;
+    lastActualError = null;
+  } catch (err) {
+    lastActualError = err instanceof Error ? err.message : String(err);
+    throw err;
+  }
+}
+
+/**
+ * Run `fn` with exclusive access to the Actual Budget API, initialising the
+ * connection on first use. Errors do not poison the queue.
+ */
+export function withActual<T>(fn: () => Promise<T>): Promise<T> {
+  const run = actualQueue.then(async () => {
+    await ensureActual();
+    return fn();
+  });
+  // Keep the chain alive regardless of outcome.
+  actualQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 export interface ActualAccount {
   id: string;
   name: string;
@@ -80,17 +138,17 @@ export async function initActual(): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes('out-of-sync-migrations') || message.includes('migration')) {
-      logger.error(
+      throw new ActualCompatibilityError(
         'Actual Budget schema is out of sync. ' +
-          'Please open Actual Budget in your browser, let it migrate, then retry.'
+          'Open Actual Budget in your browser, let it migrate, then retry.'
       );
-      process.exit(1);
     }
     throw new Error(`Failed to download Actual Budget budget: ${message}`);
   }
 }
 
 export async function shutdownActual(): Promise<void> {
+  actualReady = false;
   try {
     await (api as unknown as { shutdown: () => Promise<void> }).shutdown();
     logger.debug('Actual Budget shut down cleanly');

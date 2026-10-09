@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { logger } from './logger.js';
+import { atomicWriteFile } from './util/fs.js';
+import { withStateLock } from './util/lock.js';
 
 const AccountSchema = z.object({
   name: z.string(),
@@ -21,23 +23,40 @@ const ConfigSchema = z.object({
 export type Account = z.infer<typeof AccountSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
-const CONFIG_PATH = path.join(process.cwd(), 'data', 'config.json');
+// Resolved lazily so tests can point the path at a temp directory before the
+// first call (main code resolves on first use too).
+let configPath: string | null = null;
+
+/** Override where config.json is read/written (used by tests). */
+export function setConfigPathForTests(p: string): void {
+  configPath = p;
+}
+
+function configPathResolve(): string {
+  return (configPath ??= path.join(process.cwd(), 'data', 'config.json'));
+}
+
+/** Consent-expiry warning threshold in days (REAUTH_WARN_DAYS, default 14). */
+export function reauthWarnDays(): number {
+  const n = Number(process.env.REAUTH_WARN_DAYS ?? '14');
+  return Number.isFinite(n) && n >= 0 ? n : 14;
+}
 
 export async function loadConfig(): Promise<Config> {
-  if (!fs.existsSync(CONFIG_PATH)) {
+  if (!fs.existsSync(configPathResolve())) {
     throw new Error(
-      `Config file not found at ${CONFIG_PATH}. ` +
+      `Config file not found at ${configPathResolve()}. ` +
         'Please run "npm run setup" first to create an account mapping.'
     );
   }
 
   let raw: unknown;
   try {
-    const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+    const content = fs.readFileSync(configPathResolve(), 'utf-8');
     raw = JSON.parse(content);
   } catch (err) {
     throw new Error(
-      `Failed to read or parse config file at ${CONFIG_PATH}: ${
+      `Failed to read or parse config file at ${configPathResolve()}: ${
         err instanceof Error ? err.message : String(err)
       }`
     );
@@ -46,7 +65,7 @@ export async function loadConfig(): Promise<Config> {
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
     throw new Error(
-      `Invalid config file at ${CONFIG_PATH}: ${result.error.message}`
+      `Invalid config file at ${configPathResolve()}: ${result.error.message}`
     );
   }
 
@@ -55,18 +74,103 @@ export async function loadConfig(): Promise<Config> {
 }
 
 export async function saveConfig(config: Config): Promise<void> {
-  const dir = path.dirname(CONFIG_PATH);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
   const result = ConfigSchema.safeParse(config);
   if (!result.success) {
     throw new Error(`Cannot save invalid config: ${result.error.message}`);
   }
 
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(result.data, null, 2) + '\n', {
-    encoding: 'utf-8',
+  // Bank account names and TrueLayer account ids — treat as sensitive
+  // (tokens.json is 0600; config carries no secrets but is personal data).
+  atomicWriteFile(configPathResolve(), JSON.stringify(result.data, null, 2) + '\n', { mode: 0o600 });
+  logger.debug(`Saved config to ${configPathResolve()}`);
+}
+
+/**
+ * Merge incoming account pairings into an existing list, keyed by
+ * `truelayerAccountId`. Existing entries keep any fields not overwritten
+ * (notably `lastSyncedAt`) so re-auth never resets sync history.
+ */
+export function mergeAccounts(existing: Account[], incoming: Account[]): Account[] {
+  const merged: Account[] = [...existing];
+  for (const account of incoming) {
+    const idx = merged.findIndex(
+      (a) => a.truelayerAccountId === account.truelayerAccountId
+    );
+    if (idx !== -1) {
+      merged[idx] = { ...merged[idx], ...account };
+    } else {
+      merged.push(account);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Load config.json only if it exists, returning `null` otherwise. A file that
+ * exists but cannot be read/parsed still throws — callers must never treat a
+ * corrupt config as an empty one, or they risk wiping other connections'
+ * mappings and tokens.
+ */
+export async function loadConfigIfExists(): Promise<Config | null> {
+  if (!fs.existsSync(configPathResolve())) return null;
+  return loadConfig();
+}
+
+/**
+ * Read-modify-write `config.json` under the state lock, re-reading the file
+ * inside the critical section. Use this for partial updates (e.g. recording
+ * `lastSyncedAt`) so a concurrent writer's changes are not clobbered.
+ */
+export function updateConfig(mutator: (config: Config) => void): Promise<Config> {
+  return withStateLock(async () => {
+    const config = await loadConfig();
+    mutator(config);
+    await saveConfig(config);
+    return config;
   });
-  logger.debug(`Saved config to ${CONFIG_PATH}`);
+}
+
+export interface ReconcileOptions {
+  /** The connection id the fetched accounts now belong to. */
+  newConnectionId: string;
+  /** The previous connection id whose accounts should be repointed. */
+  remapFrom?: string;
+  /** TrueLayer account ids returned by the latest consent. */
+  fetchedIds: Set<string>;
+}
+
+export interface ReconcileResult {
+  accounts: Account[];
+  changed: boolean;
+  /** Previously mapped accounts that the consent did not return. */
+  missing: Account[];
+}
+
+/**
+ * Repoint existing mappings at a (possibly new) connection id after re-auth,
+ * without touching pairings or `lastSyncedAt`. Pure helper so the risky part
+ * of the callback is unit-testable.
+ */
+export function reconcileConfigAccounts(
+  accounts: Account[],
+  options: ReconcileOptions
+): ReconcileResult {
+  const { newConnectionId, remapFrom, fetchedIds } = options;
+  const missing: Account[] = [];
+  let changed = false;
+
+  const next = accounts.map((account) => {
+    const wasOnRemap = remapFrom !== undefined && account.connectionId === remapFrom;
+    const isFetched = fetchedIds.has(account.truelayerAccountId);
+
+    if (wasOnRemap && !isFetched) missing.push(account);
+
+    if ((wasOnRemap || isFetched) && account.connectionId !== newConnectionId) {
+      changed = true;
+      return { ...account, connectionId: newConnectionId };
+    }
+    return account;
+  });
+
+  return { accounts: next, changed, missing };
 }

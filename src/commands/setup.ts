@@ -1,7 +1,5 @@
 import 'dotenv/config';
 import readline from 'readline';
-import { execFile } from 'child_process';
-import axios from 'axios';
 import { startAuthServer } from '../auth/server.js';
 import {
   generateConnectionId,
@@ -10,8 +8,13 @@ import {
   type Tokens,
 } from '../auth/tokens.js';
 import {
-  fetchAccounts,
-  fetchCards,
+  buildAuthUrl,
+  exchangeCodeForTokens,
+  fetchTrueLayerAccounts,
+  isSandbox,
+  requireEnv,
+} from '../auth/oauth.js';
+import {
   type TrueLayerAccount,
   type TrueLayerCard,
 } from '../clients/truelayer.js';
@@ -21,50 +24,12 @@ import {
   getActualAccounts,
   type ActualAccount,
 } from '../clients/actual.js';
-import { loadConfig, saveConfig, type Config, type Account } from '../config.js';
+import { loadConfigIfExists, saveConfig, mergeAccounts, type Config, type Account } from '../config.js';
 import { logger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `Missing required environment variable: ${name}. ` +
-        'Please copy .env.example to .env and fill in the values.'
-    );
-  }
-  return value;
-}
-
-function isSandbox(clientId: string): boolean {
-  return clientId.startsWith('sandbox-');
-}
-
-function buildAuthUrl(clientId: string, redirectUri: string, sandbox: boolean): string {
-  const base = sandbox ? 'https://auth.truelayer-sandbox.com' : 'https://auth.truelayer.com';
-  const params = new URLSearchParams({
-    response_type: 'code',
-    client_id: clientId,
-    scope: 'accounts balance transactions cards offline_access',
-    redirect_uri: redirectUri,
-    providers: 'uk-cs-mock uk-ob-all uk-oauth-all',
-    prompt: 'consent',
-  });
-  return `${base}/?${params.toString()}`;
-}
-
-function tokenUrl(sandbox: boolean): string {
-  return sandbox
-    ? 'https://auth.truelayer-sandbox.com/connect/token'
-    : 'https://auth.truelayer.com/connect/token';
-}
-
-function tryOpenBrowser(url: string): void {
-  execFile('open', [url], () => { /* ignore errors */ });
-}
 
 function prompt(rl: readline.Interface, question: string): Promise<string> {
   return new Promise((resolve) => {
@@ -84,16 +49,15 @@ async function authenticateBank(
   sandbox: boolean,
   bankNumber: number
 ): Promise<{ connectionId: string; tlAccounts: TrueLayerAccount[]; tlCards: TrueLayerCard[] }> {
-  const { server, waitForCode } = await startAuthServer(port);
+  const { server, waitForCode, authState } = await startAuthServer(port);
 
-  const authUrl = buildAuthUrl(clientId, redirectUri, sandbox);
+  const authUrl = buildAuthUrl(clientId, redirectUri, sandbox, authState);
 
   console.log('\n===========================================================');
   console.log(`Bank ${bankNumber}: Open this URL to authenticate:`);
   console.log('\n' + authUrl + '\n');
   console.log('===========================================================\n');
 
-  tryOpenBrowser(authUrl);
   logger.info('Waiting for OAuth callback...');
 
   let code: string;
@@ -108,46 +72,22 @@ async function authenticateBank(
 
   // Exchange code for tokens
   logger.info('Exchanging authorization code for tokens...');
-  let tokenData: { access_token: string; refresh_token: string; expires_in: number };
-
-  try {
-    const params = new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      code,
-    });
-    const res = await axios.post<typeof tokenData>(
-      tokenUrl(sandbox),
-      params.toString(),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
-    tokenData = res.data;
-  } catch (err) {
-    if (axios.isAxiosError(err)) {
-      throw new Error(
-        `Token exchange failed: ${err.response?.status ?? 'unknown'} — ${JSON.stringify(err.response?.data)}`
-      );
-    }
-    throw err;
-  }
-
-  const tokens: Tokens = {
-    accessToken: tokenData.access_token,
-    refreshToken: tokenData.refresh_token,
-    expiresAt: new Date(Date.now() + tokenData.expires_in * 1000).toISOString(),
-  };
+  const tokens: Tokens = await exchangeCodeForTokens({
+    clientId,
+    clientSecret,
+    redirectUri,
+    code,
+    sandbox,
+  });
 
   const connectionId = generateConnectionId();
   saveConnection(connectionId, tokens);
   logger.info(`Tokens saved (connection: ${connectionId})`);
 
   logger.info('Fetching accounts and cards from TrueLayer...');
-  const [tlAccounts, tlCards] = await Promise.all([
-    fetchAccounts(tokenData.access_token),
-    fetchCards(tokenData.access_token),
-  ]);
+  const { accounts: tlAccounts, cards: tlCards } = await fetchTrueLayerAccounts(
+    tokens.accessToken
+  );
   logger.info(`Found ${tlAccounts.length} account(s) and ${tlCards.length} card(s)`);
 
   return { connectionId, tlAccounts, tlCards };
@@ -335,28 +275,24 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Load existing config to preserve lastSyncedAt for re-authenticated accounts
-  let existingConfig: Config | null = null;
+  // Load existing config to preserve lastSyncedAt for re-authenticated accounts.
+  // A config.json that exists but cannot be loaded is a hard error: treating it
+  // as a first run would overwrite it with only the new pairings and then delete
+  // every other bank's tokens.
+  let existingConfig: Config | null;
   try {
-    existingConfig = await loadConfig();
-  } catch {
-    // First run
+    existingConfig = await loadConfigIfExists();
+  } catch (err) {
+    logger.error(
+      'Config file exists but could not be loaded:',
+      err instanceof Error ? err.message : String(err)
+    );
+    process.exit(1);
   }
 
   // Merge: keep existing accounts, overwrite any that were re-paired, append new ones
   const existingAccounts = existingConfig?.accounts ?? [];
-  const mergedAccounts: Account[] = [...existingAccounts];
-  for (const account of pairedAccounts) {
-    const idx = mergedAccounts.findIndex(
-      (a) => a.truelayerAccountId === account.truelayerAccountId
-    );
-    if (idx !== -1) {
-      // Re-authenticated: update connection/pairing but preserve lastSyncedAt
-      mergedAccounts[idx] = { ...mergedAccounts[idx], ...account };
-    } else {
-      mergedAccounts.push(account);
-    }
-  }
+  const mergedAccounts = mergeAccounts(existingAccounts, pairedAccounts);
 
   const config: Config = {
     accounts: mergedAccounts,

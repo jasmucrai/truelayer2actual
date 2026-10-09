@@ -15,4 +15,8 @@ RUN apk add --no-cache python3 make g++
 RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist/
 VOLUME ["/app/data"]
-CMD ["node", "dist/commands/sync.js"]
+EXPOSE 3000
+# Always-on: Express dashboard + sync scheduler in one process.
+# For one-shot sync (external cron), override the command:
+#   docker run ... truelayer2actual node dist/commands/sync.js
+CMD ["node", "dist/commands/serve.js"]

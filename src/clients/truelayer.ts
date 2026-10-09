@@ -1,5 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import { logger } from '../logger.js';
+import { HTTP_TIMEOUT_MS, describeErrorBody } from '../util/http.js';
 
 export interface TrueLayerAccount {
   account_id: string;
@@ -37,24 +38,51 @@ export interface TrueLayerBalance {
   currency: string;
 }
 
+export interface TrueLayerMe {
+  consent_expires_at?: string;
+  consent_status?: string;
+  provider?: { provider_id?: string; display_name?: string };
+  scopes?: string[];
+}
+
+export class ConsentExpiredError extends Error {
+  constructor(message = 'TrueLayer consent has expired') {
+    super(message);
+    this.name = 'ConsentExpiredError';
+  }
+}
+
 interface TrueLayerResponse<T> {
   results: T[];
   status: string;
 }
 
-function isSandbox(): boolean {
+export function isSandbox(): boolean {
   const clientId = process.env.TRUELAYER_CLIENT_ID ?? '';
   return clientId.startsWith('sandbox-');
 }
 
-function baseUrl(): string {
+export function apiBaseUrl(): string {
   return isSandbox()
     ? 'https://api.truelayer-sandbox.com'
     : 'https://api.truelayer.com';
 }
 
-function authHeaders(accessToken: string): Record<string, string> {
-  return { Authorization: `Bearer ${accessToken}` };
+export function authBaseUrl(): string {
+  return isSandbox()
+    ? 'https://auth.truelayer-sandbox.com'
+    : 'https://auth.truelayer.com';
+}
+
+function baseUrl(): string {
+  return apiBaseUrl();
+}
+
+function authConfig(accessToken: string): { headers: Record<string, string>; timeout: number } {
+  return {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    timeout: HTTP_TIMEOUT_MS,
+  };
 }
 
 function handleAxiosError(err: unknown, context: string): never {
@@ -64,8 +92,8 @@ function handleAxiosError(err: unknown, context: string): never {
     const body = axiosErr.response?.data;
     if (status === 401) {
       throw new Error(
-        `${context}: Unauthorized (401). Your access token may be expired. ` +
-          'Try running "npm run sync" again or re-authenticate with "npm run setup".'
+        `${context}: Unauthorized (401). The access token may be expired. ` +
+          'Open the dashboard and reconnect this bank.'
       );
     }
     if (status === 403) {
@@ -74,7 +102,7 @@ function handleAxiosError(err: unknown, context: string): never {
       );
     }
     throw new Error(
-      `${context}: HTTP ${status ?? 'unknown'} — ${JSON.stringify(body) ?? axiosErr.message}`
+      `${context}: HTTP ${status ?? 'unknown'} — ${describeErrorBody(body) ?? axiosErr.message}`
     );
   }
   throw new Error(
@@ -90,7 +118,7 @@ export async function fetchAccounts(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerAccount>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     logger.debug(`Fetched ${res.data.results.length} account(s)`);
     return res.data.results;
@@ -111,7 +139,7 @@ export async function fetchCards(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerCard>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     logger.debug(`Fetched ${res.data.results.length} card(s)`);
     return res.data.results;
@@ -135,7 +163,7 @@ export async function fetchTransactions(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerTransaction>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
       params: { from, to },
     });
     logger.debug(
@@ -161,7 +189,7 @@ export async function fetchCardTransactions(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerTransaction>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
       params: { from, to },
     });
     logger.debug(`Fetched ${res.data.results.length} card transaction(s) for ${cardId}`);
@@ -180,7 +208,7 @@ export async function fetchCardBalance(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerBalance>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     const balance = res.data.results[0];
     if (!balance) throw new Error(`No balance data returned for card ${cardId}`);
@@ -199,7 +227,7 @@ export async function fetchBalance(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerBalance>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     const balance = res.data.results[0];
     if (!balance) {
@@ -209,4 +237,66 @@ export async function fetchBalance(
   } catch (err) {
     handleAxiosError(err, `fetchBalance(accountId=${accountId})`);
   }
+}
+
+/**
+ * Fetch connection metadata for the access token's connection.
+ *
+ * A 403 means the access token is fine but the underlying consent has lapsed —
+ * callers should mark the connection as needing re-auth rather than treating it
+ * as a fatal error.
+ */
+export async function getMe(accessToken: string): Promise<TrueLayerMe> {
+  const url = `${baseUrl()}/data/v1/me`;
+  logger.debug(`Fetching connection metadata from ${url}`);
+
+  try {
+    const res = await axios.get<TrueLayerResponse<TrueLayerMe>>(url, {
+      ...authConfig(accessToken),
+    });
+    const me = res.data.results[0];
+    if (!me) throw new Error('No metadata returned by /data/v1/me');
+    return me;
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 403) {
+      throw new ConsentExpiredError(
+        `TrueLayer /me returned 403: ${describeErrorBody(err.response.data)}`
+      );
+    }
+    handleAxiosError(err, 'getMe');
+  }
+}
+
+/**
+ * Generate a re-authentication link for an existing connection.
+ *
+ * Uses the ungated `POST /v1/reauthuri` endpoint (no client_secret, no consent
+ * screen review). Reuses the existing connection so account mappings and sync
+ * history are preserved. UK-only; throws an axios error on 401 when the refresh
+ * token / grace window has lapsed, in which case callers should fall back to a
+ * full authorization flow.
+ */
+export async function generateReauthLink(
+  refreshToken: string,
+  redirectUri: string,
+  state: string
+): Promise<string> {
+  const url = `${authBaseUrl()}/v1/reauthuri`;
+  logger.debug(`Requesting re-auth link from ${url}`);
+
+  const res = await axios.post<{ result: string; success: boolean }>(
+    url,
+    {
+      response_type: 'code',
+      refresh_token: refreshToken,
+      redirect_uri: redirectUri,
+      state,
+    },
+    { timeout: HTTP_TIMEOUT_MS }
+  );
+
+  if (!res.data?.result) {
+    throw new Error('TrueLayer returned no re-auth URL');
+  }
+  return res.data.result;
 }

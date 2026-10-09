@@ -6,10 +6,12 @@
   "scripts": {
     "setup": "tsx src/commands/setup.ts",
     "sync": "tsx src/commands/sync.ts",
+    "serve": "tsx src/commands/serve.ts",
     "build": "tsc --outDir dist",
     "start:setup": "node dist/commands/setup.js",
     "start:sync": "node dist/commands/sync.js",
-    "test": "node --import tsx/esm --test test/**/*.test.ts"
+    "start:serve": "node dist/commands/serve.js",
+    "test": "node --import tsx/esm --test test/*.test.ts"
   },
   "dependencies": {
     "@actual-app/api": "latest",
