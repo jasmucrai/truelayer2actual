@@ -60,7 +60,9 @@ describe('security headers', () => {
     assert.match(res.headers['content-security-policy'] ?? '', /frame-ancestors 'none'/);
     assert.equal(res.headers['x-content-type-options'], 'nosniff');
     assert.equal(res.headers['x-frame-options'], 'DENY');
-    assert.equal(res.headers['referrer-policy'], 'no-referrer');
+    // Must not be no-referrer: that makes browsers send `Origin: null` on the
+    // dashboard's own form POSTs, which the origin check rejects.
+    assert.equal(res.headers['referrer-policy'], 'same-origin');
     assert.equal(res.headers['cache-control'], 'no-store');
   });
 });

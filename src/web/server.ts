@@ -177,7 +177,10 @@ export function createApp(): Express {
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    // `same-origin`, not `no-referrer`: with no-referrer, browsers send
+    // `Origin: null` even on same-origin form POSTs, which the origin check
+    // must reject. same-origin still sends no referrer to other sites.
+    res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('Cache-Control', 'no-store');
     if (!req.path.startsWith('/healthz')) {
       res.setHeader(
