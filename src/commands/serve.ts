@@ -3,6 +3,7 @@ import { startServer } from '../web/server.js';
 import { runSync, lastSyncSettled } from './sync.js';
 import { shutdownActual } from '../clients/actual.js';
 import { logger } from '../logger.js';
+import { describeError } from '../util/errors.js';
 
 function resolvePort(): number {
   const raw = process.env.PORT ?? process.env.SETUP_PORT ?? '3000';
@@ -43,7 +44,7 @@ async function main(): Promise<void> {
     try {
       await runSync();
     } catch (err) {
-      logger.error('Scheduled sync failed:', err instanceof Error ? err.message : String(err));
+      logger.error('Scheduled sync failed:', describeError(err));
     } finally {
       running = false;
     }
@@ -76,6 +77,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.error('Fatal error:', err instanceof Error ? err.message : String(err));
+  logger.error('Fatal error:', describeError(err));
   process.exit(1);
 });

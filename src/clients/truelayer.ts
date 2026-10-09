@@ -1,6 +1,7 @@
 import axios, { AxiosError } from 'axios';
 import { logger } from '../logger.js';
 import { HTTP_TIMEOUT_MS, describeErrorBody } from '../util/http.js';
+import { describeError } from '../util/errors.js';
 
 export interface TrueLayerAccount {
   account_id: string;
@@ -106,7 +107,7 @@ function handleAxiosError(err: unknown, context: string): never {
     );
   }
   throw new Error(
-    `${context}: ${err instanceof Error ? err.message : String(err)}`
+    `${context}: ${describeError(err)}`
   );
 }
 

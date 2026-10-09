@@ -3,6 +3,7 @@ import path from 'path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import * as api from '@actual-app/api';
 import { logger } from '../logger.js';
+import { describeError } from '../util/errors.js';
 
 const CACHE_DIR = path.join(process.cwd(), 'data', 'actual-cache');
 
@@ -111,15 +112,8 @@ export async function initActual(): Promise<void> {
       password,
     });
   } catch (err) {
-    logger.error(
-      'Actual init error (full):',
-      JSON.stringify(err, Object.getOwnPropertyNames(err as object))
-    );
-    throw new Error(
-      `Failed to initialise Actual Budget: ${
-        err instanceof Error ? err.message : String(err)
-      }`
-    );
+    logger.error('Actual init error (full):', describeError(err));
+    throw new Error(`Failed to initialise Actual Budget: ${describeError(err)}`);
   }
 
   const encryptionPassword = process.env.ACTUAL_ENCRYPTION_PASSWORD;
@@ -134,16 +128,31 @@ export async function initActual(): Promise<void> {
         downloadBudget: (id: string) => Promise<void>;
       }).downloadBudget(syncId);
     }
-    logger.info('Actual Budget budget downloaded successfully');
+    logger.info(`Actual Budget budget downloaded successfully (sync id ${syncId})`);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('out-of-sync-migrations') || message.includes('migration')) {
+    const detail = describeError(err);
+    logger.error(
+      'Actual budget download failed (full):',
+      detail,
+      '— @actual-app/api version:',
+      // Best-effort version reporting for compatibility triage.
+      (() => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          return require('@actual-app/api/package.json').version;
+        } catch {
+          return 'unknown';
+        }
+      })()
+    );
+    if (detail.includes('out-of-sync-migrations') || detail.includes('invalid-schema') || detail.includes('migration')) {
       throw new ActualCompatibilityError(
-        'Actual Budget schema is out of sync. ' +
-          'Open Actual Budget in your browser, let it migrate, then retry.'
+        'Actual Budget schema is out of sync between @actual-app/api and your ' +
+          'Actual server. Open Actual Budget in your browser, let it migrate, ' +
+          'then retry. If it persists, pin @actual-app/api to your server version.'
       );
     }
-    throw new Error(`Failed to download Actual Budget budget: ${message}`);
+    throw new Error(`Failed to download Actual Budget budget: ${detail}`);
   }
 }
 

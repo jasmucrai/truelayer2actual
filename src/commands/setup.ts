@@ -26,6 +26,7 @@ import {
 } from '../clients/actual.js';
 import { loadConfigIfExists, saveConfig, mergeAccounts, type Config, type Account } from '../config.js';
 import { logger } from '../logger.js';
+import { describeError } from '../util/errors.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,7 +66,7 @@ async function authenticateBank(
     code = await waitForCode();
   } catch (err) {
     server.close();
-    throw new Error(`OAuth flow failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`OAuth flow failed: ${describeError(err)}`);
   }
 
   server.close();
@@ -285,7 +286,7 @@ async function main(): Promise<void> {
   } catch (err) {
     logger.error(
       'Config file exists but could not be loaded:',
-      err instanceof Error ? err.message : String(err)
+      describeError(err)
     );
     process.exit(1);
   }
@@ -316,6 +317,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.error('Setup failed:', err instanceof Error ? err.message : String(err));
+  logger.error('Setup failed:', describeError(err));
   process.exit(1);
 });
