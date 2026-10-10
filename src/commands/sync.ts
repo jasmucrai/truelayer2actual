@@ -25,7 +25,7 @@ import {
   importToActual,
   getActualAccountBalance,
 } from '../clients/actual.js';
-import { mapTransaction } from '../mapper.js';
+import { mapTransaction, splitPending } from '../mapper.js';
 import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
 import { describeError } from '../util/errors.js';
@@ -284,7 +284,14 @@ async function runSyncInternal(): Promise<SyncSummary> {
         logger.info(`[${account.name}] Fetched ${txns.length} transaction(s)`);
 
         const isCard = account.accountKind === 'card';
-        const mapped = txns.map((t) => mapTransaction(t, isCard));
+        const { booked, pending } = splitPending(txns);
+        if (pending.length > 0) {
+          logger.info(
+            `[${account.name}] Skipping ${pending.length} pending transaction(s); ` +
+              'they import once booked'
+          );
+        }
+        const mapped = booked.map((t) => mapTransaction(t, isCard));
         const result = await importToActual(account.actualAccountId, mapped);
 
         logger.info(`[${account.name}] +${result.added.length} added, ${result.updated.length} updated`);
