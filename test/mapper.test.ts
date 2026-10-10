@@ -34,7 +34,7 @@ require.cache[resolvedApiPath] = {
 } as unknown as NodeJS.Module;
 
 // Now import mapper — it will receive the mocked @actual-app/api
-const { mapTransaction } = await import('../src/mapper.js');
+const { mapTransaction, splitPending } = await import('../src/mapper.js');
 
 import type { TrueLayerTransaction } from '../src/clients/truelayer.js';
 
@@ -176,5 +176,51 @@ describe('mapTransaction', () => {
     const result = mapTransaction(t, false);
 
     assert.equal(result.amount, -1250);
+  });
+});
+
+describe('splitPending', () => {
+  it('keeps booked transactions as importable', () => {
+    const t = makeTransaction({ status: 'booked' });
+    const { booked, pending } = splitPending([t]);
+    assert.deepEqual(booked, [t]);
+    assert.deepEqual(pending, []);
+  });
+
+  it('holds back pending transactions', () => {
+    const t = makeTransaction({ transaction_id: 'p-1', status: 'pending' });
+    const { booked, pending } = splitPending([t]);
+    assert.deepEqual(booked, []);
+    assert.deepEqual(pending, [t]);
+  });
+
+  it('treats a missing status as booked, like mapTransaction', () => {
+    const { status: _removed, ...noStatus } = makeTransaction() as TrueLayerTransaction & { status?: string };
+    const { booked, pending } = splitPending([noStatus as TrueLayerTransaction]);
+    assert.equal(booked.length, 1);
+    assert.equal(pending.length, 0);
+  });
+
+  it('does not import the pending copy and its later booked copy together', () => {
+    // Pending and booked can carry different transaction_ids; only the booked
+    // one may reach Actual.
+    const pendingCopy = makeTransaction({ transaction_id: 'pending-id', status: 'pending' });
+    const bookedCopy = makeTransaction({ transaction_id: 'booked-id', status: 'booked' });
+    const { booked } = splitPending([pendingCopy]);
+    assert.deepEqual(booked, []);
+    const later = splitPending([bookedCopy]);
+    assert.deepEqual(later.booked.map((t) => t.transaction_id), ['booked-id']);
+  });
+
+  it('preserves order and splits a mixed batch', () => {
+    const txns = [
+      makeTransaction({ transaction_id: 'a', status: 'booked' }),
+      makeTransaction({ transaction_id: 'b', status: 'pending' }),
+      makeTransaction({ transaction_id: 'c' }),
+      makeTransaction({ transaction_id: 'd', status: 'pending' }),
+    ];
+    const { booked, pending } = splitPending(txns);
+    assert.deepEqual(booked.map((t) => t.transaction_id), ['a', 'c']);
+    assert.deepEqual(pending.map((t) => t.transaction_id), ['b', 'd']);
   });
 });

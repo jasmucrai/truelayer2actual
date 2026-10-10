@@ -10,6 +10,27 @@ export interface ActualTransaction {
   cleared: boolean;
 }
 
+/**
+ * Split fetched transactions into booked (importable) and pending.
+ *
+ * Pending transactions are not imported: when one settles, TrueLayer can return
+ * it under a different transaction_id, so importing both would duplicate the
+ * payment in Actual. Booked versions are picked up on a later sync, because the
+ * lookback window re-fetches recent days. A missing status is treated as booked,
+ * matching mapTransaction.
+ */
+export function splitPending<T extends TrueLayerTransaction>(
+  txns: T[]
+): { booked: T[]; pending: T[] } {
+  const booked: T[] = [];
+  const pending: T[] = [];
+  for (const t of txns) {
+    if (t.status === undefined || t.status === 'booked') booked.push(t);
+    else pending.push(t);
+  }
+  return { booked, pending };
+}
+
 export function mapTransaction(t: TrueLayerTransaction, isCard = false): ActualTransaction {
   // Extract date portion from ISO 8601 timestamp
   const date = t.timestamp.split('T')[0];
