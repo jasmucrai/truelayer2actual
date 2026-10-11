@@ -21,7 +21,15 @@ export interface TrueLayerCard {
 }
 
 export interface TrueLayerTransaction {
+  /** TrueLayer-generated; can change when the bank amends the transaction. */
   transaction_id: string;
+  /**
+   * Stable ID derived solely from the bank's own transaction ID (optional;
+   * not available for every provider, e.g. Amex). Preferred for dedupe.
+   */
+  normalised_provider_transaction_id?: string;
+  /** The bank's own transaction ID, when the provider returns one. */
+  provider_transaction_id?: string;
   timestamp: string; // ISO 8601
   amount: number; // negative = debit
   currency: string;

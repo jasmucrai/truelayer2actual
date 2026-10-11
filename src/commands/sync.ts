@@ -24,8 +24,10 @@ import {
   shutdownActual,
   importToActual,
   getActualAccountBalance,
+  getActualImportedIds,
+  setActualImportedId,
 } from '../clients/actual.js';
-import { mapTransaction } from '../mapper.js';
+import { mapTransaction, planImportedIdMigrations } from '../mapper.js';
 import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
 import { describeError } from '../util/errors.js';
@@ -41,6 +43,45 @@ const withSyncLock = createMutex();
 
 function today(): string {
   return new Date().toISOString().split('T')[0];
+}
+
+function shiftDate(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().split('T')[0];
+}
+
+/**
+ * Move rows already in Actual under TrueLayer's old transaction_id onto the
+ * stable ID, so the import below matches them instead of adding duplicates.
+ * Best-effort: on failure, log and import anyway.
+ */
+async function migrateImportedIds(
+  account: Account,
+  txns: Parameters<typeof planImportedIdMigrations>[0],
+  from: string,
+  to: string
+): Promise<void> {
+  try {
+    // Widen the window a little: an amended transaction can shift date.
+    const existing = await getActualImportedIds(
+      account.actualAccountId,
+      shiftDate(from, -7),
+      shiftDate(to, 7)
+    );
+    const plan = planImportedIdMigrations(txns, existing);
+    for (const m of plan) await setActualImportedId(m.id, m.imported_id);
+    if (plan.length > 0) {
+      logger.info(
+        `[${account.name}] Moved ${plan.length} existing transaction(s) to TrueLayer's stable ID`
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      `[${account.name}] Could not migrate imported IDs (import continues):`,
+      describeError(err)
+    );
+  }
 }
 
 function daysAgo(n: number): string {
@@ -282,6 +323,8 @@ async function runSyncInternal(): Promise<SyncSummary> {
           ? await fetchCardTransactions(accessToken, account.truelayerAccountId, from, to)
           : await fetchTransactions(accessToken, account.truelayerAccountId, from, to);
         logger.info(`[${account.name}] Fetched ${txns.length} transaction(s)`);
+
+        await migrateImportedIds(account, txns, from, to);
 
         const isCard = account.accountKind === 'card';
         const mapped = txns.map((t) => mapTransaction(t, isCard));
