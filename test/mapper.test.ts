@@ -34,7 +34,7 @@ require.cache[resolvedApiPath] = {
 } as unknown as NodeJS.Module;
 
 // Now import mapper — it will receive the mocked @actual-app/api
-const { mapTransaction, splitPending } = await import('../src/mapper.js');
+const { mapTransaction, importedIdFor, planImportedIdMigrations } = await import('../src/mapper.js');
 
 import type { TrueLayerTransaction } from '../src/clients/truelayer.js';
 
@@ -179,48 +179,108 @@ describe('mapTransaction', () => {
   });
 });
 
-describe('splitPending', () => {
-  it('keeps booked transactions as importable', () => {
-    const t = makeTransaction({ status: 'booked' });
-    const { booked, pending } = splitPending([t]);
-    assert.deepEqual(booked, [t]);
-    assert.deepEqual(pending, []);
+describe('importedIdFor (stable dedupe ID)', () => {
+  it('prefers normalised_provider_transaction_id when present', () => {
+    const t = makeTransaction({
+      transaction_id: 'tl-123',
+      normalised_provider_transaction_id: 'txn-stable-1',
+    });
+    assert.equal(importedIdFor(t), 'txn-stable-1');
+    assert.equal(mapTransaction(t).imported_id, 'txn-stable-1');
   });
 
-  it('holds back pending transactions', () => {
-    const t = makeTransaction({ transaction_id: 'p-1', status: 'pending' });
-    const { booked, pending } = splitPending([t]);
-    assert.deepEqual(booked, []);
-    assert.deepEqual(pending, [t]);
+  it('falls back to transaction_id when the provider has no stable ID', () => {
+    const t = makeTransaction({ transaction_id: 'tl-123' });
+    assert.equal(importedIdFor(t), 'tl-123');
+    assert.equal(mapTransaction(t).imported_id, 'tl-123');
   });
 
-  it('treats a missing status as booked, like mapTransaction', () => {
-    const { status: _removed, ...noStatus } = makeTransaction() as TrueLayerTransaction & { status?: string };
-    const { booked, pending } = splitPending([noStatus as TrueLayerTransaction]);
-    assert.equal(booked.length, 1);
-    assert.equal(pending.length, 0);
+  it('treats an empty or blank stable ID as absent', () => {
+    assert.equal(
+      importedIdFor(makeTransaction({ transaction_id: 'tl-1', normalised_provider_transaction_id: '' })),
+      'tl-1'
+    );
+    assert.equal(
+      importedIdFor(makeTransaction({ transaction_id: 'tl-1', normalised_provider_transaction_id: '  ' })),
+      'tl-1'
+    );
   });
 
-  it('does not import the pending copy and its later booked copy together', () => {
-    // Pending and booked can carry different transaction_ids; only the booked
-    // one may reach Actual.
-    const pendingCopy = makeTransaction({ transaction_id: 'pending-id', status: 'pending' });
-    const bookedCopy = makeTransaction({ transaction_id: 'booked-id', status: 'booked' });
-    const { booked } = splitPending([pendingCopy]);
-    assert.deepEqual(booked, []);
-    const later = splitPending([bookedCopy]);
-    assert.deepEqual(later.booked.map((t) => t.transaction_id), ['booked-id']);
+  it('keeps the same ID when TrueLayer changes transaction_id (the duplicate bug)', () => {
+    const before = makeTransaction({ transaction_id: 'tl-old', normalised_provider_transaction_id: 'txn-s' });
+    const after = makeTransaction({ transaction_id: 'tl-new', normalised_provider_transaction_id: 'txn-s' });
+    assert.equal(mapTransaction(before).imported_id, mapTransaction(after).imported_id);
+  });
+});
+
+describe('planImportedIdMigrations', () => {
+  const stableTxn = (transaction_id: string, normalised?: string) =>
+    makeTransaction({ transaction_id, normalised_provider_transaction_id: normalised });
+
+  it('moves a row imported under the old transaction_id onto the stable ID', () => {
+    const plan = planImportedIdMigrations(
+      [stableTxn('tl-1', 'txn-s1')],
+      [{ id: 'actual-row-1', imported_id: 'tl-1' }]
+    );
+    assert.deepEqual(plan, [{ id: 'actual-row-1', imported_id: 'txn-s1' }]);
   });
 
-  it('preserves order and splits a mixed batch', () => {
-    const txns = [
-      makeTransaction({ transaction_id: 'a', status: 'booked' }),
-      makeTransaction({ transaction_id: 'b', status: 'pending' }),
-      makeTransaction({ transaction_id: 'c' }),
-      makeTransaction({ transaction_id: 'd', status: 'pending' }),
-    ];
-    const { booked, pending } = splitPending(txns);
-    assert.deepEqual(booked.map((t) => t.transaction_id), ['a', 'c']);
-    assert.deepEqual(pending.map((t) => t.transaction_id), ['b', 'd']);
+  it('does nothing when a row already uses the stable ID', () => {
+    const plan = planImportedIdMigrations(
+      [stableTxn('tl-1', 'txn-s1')],
+      [
+        { id: 'row-stable', imported_id: 'txn-s1' },
+        { id: 'row-legacy', imported_id: 'tl-1' },
+      ]
+    );
+    assert.deepEqual(plan, []);
+  });
+
+  it('does nothing when the provider has no stable ID', () => {
+    const plan = planImportedIdMigrations(
+      [stableTxn('tl-1')],
+      [{ id: 'row-1', imported_id: 'tl-1' }]
+    );
+    assert.deepEqual(plan, []);
+  });
+
+  it('does nothing for new transactions with no existing row', () => {
+    const plan = planImportedIdMigrations([stableTxn('tl-9', 'txn-s9')], [
+      { id: 'row-1', imported_id: 'tl-1' },
+    ]);
+    assert.deepEqual(plan, []);
+  });
+
+  it('ignores rows without an imported_id (manual entries)', () => {
+    const plan = planImportedIdMigrations([stableTxn('tl-1', 'txn-s1')], [
+      { id: 'manual', imported_id: null },
+      { id: 'manual-2' },
+    ]);
+    assert.deepEqual(plan, []);
+  });
+
+  it('migrates each row at most once, even if two incoming items share its old ID', () => {
+    const plan = planImportedIdMigrations(
+      [stableTxn('tl-1', 'txn-a'), stableTxn('tl-1', 'txn-b')],
+      [{ id: 'row-1', imported_id: 'tl-1' }]
+    );
+    assert.deepEqual(plan, [{ id: 'row-1', imported_id: 'txn-a' }]);
+  });
+
+  it('handles a mixed batch', () => {
+    const plan = planImportedIdMigrations(
+      [
+        stableTxn('tl-1', 'txn-s1'), // legacy row → migrate
+        stableTxn('tl-2', 'txn-s2'), // already stable → skip
+        stableTxn('tl-3'), // no stable ID → skip
+        stableTxn('tl-4', 'txn-s4'), // brand new → skip (import adds it)
+      ],
+      [
+        { id: 'r1', imported_id: 'tl-1' },
+        { id: 'r2', imported_id: 'txn-s2' },
+        { id: 'r3', imported_id: 'tl-3' },
+      ]
+    );
+    assert.deepEqual(plan, [{ id: 'r1', imported_id: 'txn-s1' }]);
   });
 });

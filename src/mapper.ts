@@ -6,29 +6,68 @@ export interface ActualTransaction {
   amount: number; // integer pence, from utils.amountToInteger()
   payee_name?: string; // merchant_name || description
   notes?: string; // description
-  imported_id: string; // transaction_id
+  imported_id: string; // see importedIdFor
   cleared: boolean;
 }
 
 /**
- * Split fetched transactions into booked (importable) and pending.
+ * The ID used as Actual's `imported_id`.
  *
- * Pending transactions are not imported: when one settles, TrueLayer can return
- * it under a different transaction_id, so importing both would duplicate the
- * payment in Actual. Booked versions are picked up on a later sync, because the
- * lookback window re-fetches recent days. A missing status is treated as booked,
- * matching mapTransaction.
+ * TrueLayer's `transaction_id` can change when a bank amends a transaction
+ * (FX settlement, adjustments, fraud checks), and Actual skips its fuzzy
+ * matching when both sides have an imported_id, so a changed ID becomes a
+ * duplicate. `normalised_provider_transaction_id` is documented as not subject
+ * to change, so prefer it and fall back when the provider doesn't supply it.
  */
-export function splitPending<T extends TrueLayerTransaction>(
-  txns: T[]
-): { booked: T[]; pending: T[] } {
-  const booked: T[] = [];
-  const pending: T[] = [];
-  for (const t of txns) {
-    if (t.status === undefined || t.status === 'booked') booked.push(t);
-    else pending.push(t);
+export function importedIdFor(t: TrueLayerTransaction): string {
+  const stable = t.normalised_provider_transaction_id?.trim();
+  return stable ? stable : t.transaction_id;
+}
+
+export interface ExistingImport {
+  id: string;
+  imported_id?: string | null;
+}
+
+export interface ImportedIdMigration {
+  /** Actual transaction id to update. */
+  id: string;
+  /** New imported_id (the stable ID). */
+  imported_id: string;
+}
+
+/**
+ * Plan in-place updates so transactions already in Actual under their old
+ * `transaction_id` are moved to the stable ID before importing. Without this,
+ * switching IDs would re-import every transaction in the lookback window.
+ *
+ * A row is migrated only when the incoming transaction has a stable ID, no
+ * existing row already uses it, and an existing row uses the incoming
+ * `transaction_id`. Each existing row is migrated at most once.
+ */
+export function planImportedIdMigrations(
+  txns: TrueLayerTransaction[],
+  existing: ExistingImport[]
+): ImportedIdMigration[] {
+  const rowByImportedId = new Map<string, string>();
+  for (const row of existing) {
+    if (row.imported_id) rowByImportedId.set(row.imported_id, row.id);
   }
-  return { booked, pending };
+
+  const migrated = new Set<string>();
+  const plan: ImportedIdMigration[] = [];
+  for (const t of txns) {
+    const stable = importedIdFor(t);
+    if (stable === t.transaction_id) continue; // no stable ID, nothing to move
+    if (rowByImportedId.has(stable)) continue; // already on the stable ID
+    const rowId = rowByImportedId.get(t.transaction_id);
+    if (!rowId || migrated.has(rowId)) continue;
+    plan.push({ id: rowId, imported_id: stable });
+    migrated.add(rowId);
+    rowByImportedId.delete(t.transaction_id);
+    rowByImportedId.set(stable, rowId);
+  }
+  return plan;
 }
 
 export function mapTransaction(t: TrueLayerTransaction, isCard = false): ActualTransaction {
@@ -56,7 +95,7 @@ export function mapTransaction(t: TrueLayerTransaction, isCard = false): ActualT
     amount,
     payee_name,
     notes: t.description,
-    imported_id: t.transaction_id,
+    imported_id: importedIdFor(t),
     cleared,
   };
 }

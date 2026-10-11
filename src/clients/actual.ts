@@ -228,6 +228,28 @@ export async function getActualAccountBalance(accountId: string): Promise<number
   }).getAccountBalance(accountId);
 }
 
+/** Actual transactions in a date range, reduced to what ID migration needs. */
+export async function getActualImportedIds(
+  accountId: string,
+  startDate: string,
+  endDate: string
+): Promise<{ id: string; imported_id?: string | null }[]> {
+  const rows = await (api as unknown as {
+    getTransactions: (
+      accountId: string,
+      startDate: string,
+      endDate: string
+    ) => Promise<{ id: string; imported_id?: string | null }[]>;
+  }).getTransactions(accountId, startDate, endDate);
+  return rows.map((r) => ({ id: r.id, imported_id: r.imported_id ?? null }));
+}
+
+export async function setActualImportedId(id: string, importedId: string): Promise<void> {
+  await (api as unknown as {
+    updateTransaction: (id: string, fields: { imported_id: string }) => Promise<unknown>;
+  }).updateTransaction(id, { imported_id: importedId });
+}
+
 export async function getActualTransactions(
   accountId: string,
   startDate: string,
