@@ -160,6 +160,18 @@ export function markConnectionNeedsReauth(connectionId: string, reason: string):
   return updateConnection(connectionId, { needsReauth: true, reauthReason: reason });
 }
 
+/** Delete a single connection from tokens.json. Returns whether it existed. */
+export function deleteConnection(connectionId: string): Promise<boolean> {
+  return withStateLock(() => {
+    const file = readTokensFile();
+    if (!file.connections[connectionId]) return false;
+    delete file.connections[connectionId];
+    writeTokensFile(file);
+    logger.info(`Deleted connection ${connectionId} from tokens.json`);
+    return true;
+  });
+}
+
 export function removeStaleConnections(activeConnectionIds: Set<string>): void {
   const file = readTokensFile();
   let changed = false;

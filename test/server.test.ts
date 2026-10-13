@@ -1,9 +1,19 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { once } from 'events';
 import type { Express } from 'express';
-import { createApp, hostAllowed } from '../src/web/server.js';
+import { setTokensPathForTests, saveConnection } from '../src/auth/tokens.js';
+
+// Point tokens.json at a temp dir before importing the server (paths are
+// resolved lazily on first use, same pattern as test/state.test.ts).
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 't2a-server-test-'));
+setTokensPathForTests(path.join(tmpDir, 'tokens.json'));
+
+const { createApp, hostAllowed } = await import('../src/web/server.js');
 
 interface Res {
   status: number;
@@ -274,6 +284,27 @@ describe('origin check on state-changing POSTs', () => {
     } finally {
       delete process.env.DASHBOARD_URL;
     }
+  });
+});
+
+describe('GET /connections/:id/delete (confirmation page)', () => {
+  it('returns 404 for an unknown connection id', async () => {
+    const res = await request(app, '/connections/conn_unknown/delete');
+    assert.equal(res.status, 404);
+  });
+
+  it('returns 200 with a confirmation page, and no inline onsubmit handler', async () => {
+    saveConnection('conn_delete_me', {
+      accessToken: 'a',
+      refreshToken: 'r',
+      expiresAt: new Date().toISOString(),
+      providerDisplayName: 'Test Bank',
+    });
+
+    const res = await request(app, '/connections/conn_delete_me/delete');
+    assert.equal(res.status, 200);
+    assert.match(res.body, /delete/i);
+    assert.doesNotMatch(res.body, /onsubmit/);
   });
 });
 
