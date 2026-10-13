@@ -65,8 +65,10 @@ ACTUAL_PASSWORD=
 ACTUAL_SYNC_ID=                     # found in Actual → Settings → Advanced
 ACTUAL_ENCRYPTION_PASSWORD=         # optional — only if E2E encryption is enabled
 
-# If Actual uses a self-signed certificate:
-# NODE_TLS_REJECT_UNAUTHORIZED=0
+# If Actual is served over HTTPS with a self-signed certificate, trust just
+# that CA. Never use NODE_TLS_REJECT_UNAUTHORIZED=0 — it disables certificate
+# validation for every outbound request, including TrueLayer auth and data.
+# NODE_EXTRA_CA_CERTS=/path/to/actual-ca.pem
 
 # Logging
 LOG_LEVEL=info            # debug | info | warn | error

@@ -167,6 +167,30 @@ export function updateConfig(mutator: (config: Config) => void): Promise<Config>
   });
 }
 
+/**
+ * Remove every account mapping that belongs to a connection (used when a
+ * connection is deleted). Returns the remaining accounts. Does not throw when
+ * no config exists yet.
+ */
+export async function removeAccountsForConnection(connectionId: string): Promise<Account[]> {
+  return withStateLock(async () => {
+    let config: Config;
+    try {
+      config = await loadConfig();
+    } catch {
+      return [];
+    }
+
+    const remaining = config.accounts.filter((a) => a.connectionId !== connectionId);
+    if (remaining.length !== config.accounts.length) {
+      config.accounts = remaining;
+      await saveConfig(config);
+      logger.debug(`Removed accounts for connection ${connectionId} from config.json`);
+    }
+    return remaining;
+  });
+}
+
 export interface ReconcileOptions {
   /** The connection id the fetched accounts now belong to. */
   newConnectionId: string;

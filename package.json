@@ -16,14 +16,17 @@
   "dependencies": {
     "@actual-app/api": "26.10.0",
     "axios": "^1",
+    "dotenv": "^16",
     "express": "^4",
-    "zod": "^3",
-    "dotenv": "^16"
+    "zod": "^3"
   },
   "devDependencies": {
-    "typescript": "^5",
-    "tsx": "^4",
     "@types/express": "^4",
-    "@types/node": "^20"
+    "@types/node": "^20",
+    "tsx": "^4.23.13",
+    "typescript": "^5"
+  },
+  "overrides": {
+    "qs": "6.16.0"
   }
 }
