@@ -13,6 +13,10 @@ interface MockState {
   loadedGroupId: string | null;
   initCalls: number;
   downloads: { syncId: string; password?: string }[];
+  /** Order of API calls made by getActualAccounts. */
+  calls: string[];
+  /** Called for each sync(); may throw. */
+  onSync: () => Promise<void> | void;
   /** Called for each download; may throw. Default: load the requested budget. */
   onDownload: (syncId: string) => Promise<void> | void;
 }
@@ -21,6 +25,8 @@ const mock: MockState = {
   loadedGroupId: null,
   initCalls: 0,
   downloads: [],
+  calls: [],
+  onSync: () => {},
   onDownload: (syncId) => {
     mock.loadedGroupId = syncId;
   },
@@ -37,6 +43,17 @@ const mockExports = {
     await mock.onDownload(syncId);
   },
   shutdown: async () => {},
+  sync: async () => {
+    mock.calls.push('sync');
+    await mock.onSync();
+  },
+  getAccounts: async () => {
+    mock.calls.push('getAccounts');
+    return [
+      { id: 'a1', name: 'Open', offbudget: false, closed: false },
+      { id: 'a2', name: 'Closed', offbudget: false, closed: true },
+    ];
+  },
   internal: {
     send: async (name: string) => {
       assert.equal(name, 'load-prefs');
@@ -65,7 +82,7 @@ const savedEnv = {
 process.env.ACTUAL_SERVER_URL = 'http://actual.invalid';
 process.env.ACTUAL_PASSWORD = 'secret';
 process.chdir(tmpDir);
-const { switchBudget, withBudget, getActualError, shutdownActual } = await import('../src/clients/actual.js');
+const { switchBudget, withBudget, getActualError, shutdownActual, getActualAccounts } = await import('../src/clients/actual.js');
 process.chdir(originalCwd);
 
 after(async () => {
@@ -80,6 +97,8 @@ after(async () => {
 function resetMock(): void {
   mock.loadedGroupId = null;
   mock.downloads = [];
+  mock.calls = [];
+  mock.onSync = () => {};
   mock.onDownload = (syncId) => {
     mock.loadedGroupId = syncId;
   };
@@ -231,5 +250,24 @@ describe('withBudget', () => {
     await assert.rejects(failingFn, /fn boom/);
     await assert.rejects(failingSwitch, /download boom/);
     assert.equal(await ok, 'fine');
+  });
+});
+
+describe('getActualAccounts', () => {
+  it('syncs before reading and hides closed accounts', async () => {
+    resetMock();
+    const accounts = await getActualAccounts();
+    assert.deepEqual(mock.calls, ['sync', 'getAccounts']);
+    assert.deepEqual(accounts.map((a) => a.id), ['a1']);
+  });
+
+  it('falls back to the local copy when sync fails', async () => {
+    resetMock();
+    mock.onSync = () => {
+      throw new Error('offline');
+    };
+    const accounts = await getActualAccounts();
+    assert.deepEqual(mock.calls, ['sync', 'getAccounts']);
+    assert.deepEqual(accounts.map((a) => a.id), ['a1']);
   });
 });

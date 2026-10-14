@@ -269,6 +269,14 @@ export async function shutdownActual(): Promise<void> {
 }
 
 export async function getActualAccounts(): Promise<ActualAccount[]> {
+  // The loaded budget is reused across calls, so pull remote changes first or
+  // accounts added in Actual after it was loaded never show up. Best effort:
+  // fall back to the local copy if the server is unreachable.
+  try {
+    await (api as unknown as { sync: () => Promise<void> }).sync();
+  } catch (err) {
+    logger.warn('Could not sync Actual Budget before listing accounts:', describeError(err));
+  }
   const accounts = await (api as unknown as {
     getAccounts: () => Promise<ActualAccount[]>;
   }).getAccounts();
