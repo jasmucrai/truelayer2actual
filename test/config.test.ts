@@ -6,6 +6,9 @@ import path from 'path';
 import {
   setConfigPathForTests,
   loadConfig,
+  loadConfigIfExists,
+  ConfigNotFoundError,
+  removeAccountsForConnection,
   listBudgets,
   addBudget,
   budgetFromEnv,
@@ -443,10 +446,10 @@ describe('listBudgets', () => {
     assert.deepEqual((await listBudgets()).map((b) => b.id), ['budget_1']);
   });
 
-  it('falls back to the env budget when the config is corrupt', async () => {
+  it('throws rather than falling back to the env budget when the config is corrupt', async () => {
     process.env.ACTUAL_SYNC_ID = 'env-sync';
     fs.writeFileSync(configPath, '{ broken');
-    assert.deepEqual((await listBudgets()).map((b) => b.id), ['default']);
+    await assert.rejects(() => listBudgets(), /Failed to read or parse config file/);
   });
 });
 
@@ -518,5 +521,32 @@ describe('addBudget', () => {
     const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
     assert.ok(rejected.reason instanceof DuplicateSyncIdError);
     assert.equal(readConfig().budgets.length, 1);
+  });
+});
+
+describe('config file safety', () => {
+  it('throws instead of returning null for a corrupt config', async () => {
+    fs.writeFileSync(configPath, '{ not valid json');
+    await assert.rejects(loadConfigIfExists(), /Failed to read or parse/);
+  });
+
+  it('does not overwrite a corrupt config when adding a budget', async () => {
+    fs.writeFileSync(configPath, '{ not valid json');
+    await assert.rejects(
+      addBudget({ id: 'b1', name: 'Budget', syncId: 'sync-1' }),
+      /Failed to read or parse/
+    );
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), '{ not valid json');
+  });
+
+  it('does not treat a corrupt config as empty when removing connection accounts', async () => {
+    fs.writeFileSync(configPath, '{ not valid json');
+    await assert.rejects(removeAccountsForConnection('c1'), /Failed to read or parse/);
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), '{ not valid json');
+  });
+
+  it('returns null only when the file is missing', async () => {
+    assert.equal(await loadConfigIfExists(), null);
+    await assert.rejects(loadConfig(), (err: unknown) => err instanceof ConfigNotFoundError);
   });
 });

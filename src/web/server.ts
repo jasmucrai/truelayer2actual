@@ -72,12 +72,7 @@ function asString(value: unknown): string | undefined {
 async function buildConnectionViews(): Promise<ConnectionView[]> {
   const connections = loadAllConnections();
 
-  let accounts: Config['accounts'] = [];
-  try {
-    accounts = (await loadConfigIfExists())?.accounts ?? [];
-  } catch {
-    accounts = [];
-  }
+  const accounts = (await loadConfigIfExists())?.accounts ?? [];
 
   return Object.entries(connections).map(([id, tokens]) => {
     const mine = accounts.filter((a) => a.connectionId === id);
