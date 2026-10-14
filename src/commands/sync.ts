@@ -41,8 +41,10 @@ export const withSyncLock = createMutex();
 // Date helpers
 // ---------------------------------------------------------------------------
 
-function today(): string {
-  return new Date().toISOString().split('T')[0];
+const MS_PER_DAY = 86_400_000;
+
+function toDateString(ms: number): string {
+  return new Date(ms).toISOString().split('T')[0];
 }
 
 function shiftDate(date: string, days: number): string {
@@ -84,14 +86,59 @@ async function migrateImportedIds(
   }
 }
 
-function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().split('T')[0];
+export interface SyncWindow {
+  from: string;
+  to: string;
+}
+
+/**
+ * Work out the inclusive date range to fetch for an account. Always looks back
+ * at least `lookbackDays` so transactions that were pending last time but have
+ * since settled are re-fetched, extending further when the last sync is older
+ * than that. All arithmetic is in UTC milliseconds, so it is unaffected by the
+ * host timezone or DST.
+ */
+export function resolveSyncWindow(
+  lastSyncedAt: string | undefined,
+  lookbackDays: number,
+  nowMs = Date.now()
+): SyncWindow {
+  const floor = toDateString(nowMs - lookbackDays * MS_PER_DAY);
+  const lastSyncDate = lastSyncedAt ? lastSyncedAt.split('T')[0] : floor;
+  const from = lastSyncDate < floor ? lastSyncDate : floor;
+  return { from, to: toDateString(nowMs) };
+}
+
+/** Parse SYNC_DAYS_LOOKBACK, defaulting to 7 days when missing or invalid. */
+export function syncLookbackDays(): number {
+  const raw = process.env.SYNC_DAYS_LOOKBACK;
+  if (raw === undefined || raw.trim() === '') return 7;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    logger.warn(`Ignoring invalid SYNC_DAYS_LOOKBACK "${raw}" — using 7 days.`);
+    return 7;
+  }
+  return Math.floor(n);
 }
 
 export function dashboardUrl(): string | undefined {
   return process.env.DASHBOARD_URL;
+}
+
+/**
+ * Parse SYNC_INTERVAL_HOURS. Missing/blank means one-shot mode (0). An invalid
+ * value also falls back to one-shot with a warning, so a typo can never spin
+ * the scheduler on a NaN delay.
+ */
+export function resolveIntervalHours(): number {
+  const raw = process.env.SYNC_INTERVAL_HOURS;
+  if (raw === undefined || raw.trim() === '') return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    logger.warn(`Ignoring invalid SYNC_INTERVAL_HOURS "${raw}" — running one-shot.`);
+    return 0;
+  }
+  return n;
 }
 
 function connectionLabel(connectionId: string): string {
@@ -287,15 +334,7 @@ async function syncAccount(
   summary: SyncSummary
 ): Promise<void> {
   try {
-    const lookback = Number(process.env.SYNC_DAYS_LOOKBACK ?? '7');
-    const to = today();
-    const lastSyncDate = account.lastSyncedAt
-      ? account.lastSyncedAt.split('T')[0]
-      : daysAgo(lookback);
-    // Always look back at least `lookback` days so transactions that were pending
-    // at last sync but have since settled are not missed.
-    const floor = daysAgo(lookback);
-    const from = lastSyncDate < floor ? lastSyncDate : floor;
+    const { from, to } = resolveSyncWindow(account.lastSyncedAt, syncLookbackDays());
 
     logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
 
@@ -454,7 +493,8 @@ async function runSyncInternal(): Promise<SyncSummary> {
   return summary;
 }
 
-async function main(): Promise<void> {
+/** One-shot run: sync, then release the Actual Budget client. */
+async function runOnce(): Promise<void> {
   try {
     await runSync();
   } finally {
@@ -463,20 +503,36 @@ async function main(): Promise<void> {
 }
 
 async function loop(): Promise<void> {
-  const intervalHours = Number(process.env.SYNC_INTERVAL_HOURS ?? '0');
+  const intervalHours = resolveIntervalHours();
 
   if (intervalHours <= 0) {
     // One-shot mode (for external schedulers like Synology Task Scheduler)
-    await main();
+    await runOnce();
     return;
   }
 
   const intervalMs = intervalHours * 60 * 60 * 1000;
   logger.info(`Running in loop mode — syncing every ${intervalHours} hour(s)`);
 
+  // Keep the Actual client initialised between iterations and release it only
+  // on shutdown. Shutting it down and re-initialising every cycle would rely on
+  // undocumented re-init behaviour in @actual-app/api.
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`Received ${signal} — shutting down`);
+    // Let an in-flight sync finish so state files are not cut off mid-write.
+    await lastSyncSettled();
+    await shutdownActual();
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    await main().catch((err) => {
+    await runSync().catch((err) => {
       logger.error('Sync failed:', describeError(err));
     });
     logger.info(`Next sync in ${intervalHours} hour(s)...`);

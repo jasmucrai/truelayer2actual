@@ -43,11 +43,25 @@ export interface PendingAuth {
 
 const pendingAuth = new Map<string, PendingAuth>();
 
+/**
+ * Drop expired entries so the in-memory stores cannot grow without bound on a
+ * long-running server (e.g. repeated hits on /auth/new that never complete).
+ */
+function pruneExpired<T extends { createdAt: number }>(
+  map: Map<string, T>,
+  now = Date.now()
+): void {
+  for (const [key, entry] of map) {
+    if (now - entry.createdAt > PENDING_TTL_MS) map.delete(key);
+  }
+}
+
 export function createState(): string {
   return crypto.randomBytes(16).toString('hex');
 }
 
 export function setPending(state: string, entry: Omit<PendingAuth, 'createdAt'>): void {
+  pruneExpired(pendingAuth);
   pendingAuth.set(state, { ...entry, createdAt: Date.now() });
 }
 
@@ -112,6 +126,7 @@ const pairingSessions = new Map<string, PairingSession>();
 
 /** Exported so tests can build a pairing session without running the OAuth flow. */
 export function setPairing(session: Omit<PairingSession, 'createdAt'>): string {
+  pruneExpired(pairingSessions);
   const id = crypto.randomBytes(12).toString('hex');
   pairingSessions.set(id, { ...session, createdAt: Date.now() });
   return id;

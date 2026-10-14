@@ -172,12 +172,29 @@ function normalizeBudgets(data: Config): Config {
   return budgets === data.budgets ? data : { ...data, budgets };
 }
 
-export async function loadConfig(): Promise<Config> {
-  if (!fs.existsSync(configPathResolve())) {
-    throw new Error(
+/**
+ * Thrown by {@link loadConfig} when there is no config file yet. Distinct from
+ * a corrupt/invalid file so callers can safely treat "no file" as an empty
+ * starting point without silently clobbering a file they failed to parse.
+ */
+export class ConfigNotFoundError extends Error {
+  constructor() {
+    super(
       `Config file not found at ${configPathResolve()}. ` +
         'Please run "npm run setup" first to create an account mapping.'
     );
+    this.name = 'ConfigNotFoundError';
+  }
+}
+
+/** An empty config, used when bootstrapping the first budget/account. */
+export function emptyConfig(): Config {
+  return { budgets: [], accounts: [], createdAt: new Date().toISOString() };
+}
+
+export async function loadConfig(): Promise<Config> {
+  if (!fs.existsSync(configPathResolve())) {
+    throw new ConfigNotFoundError();
   }
 
   let raw: unknown;
@@ -306,8 +323,12 @@ export function applyPairingChanges(
  * mappings and tokens.
  */
 export async function loadConfigIfExists(): Promise<Config | null> {
-  if (!fs.existsSync(configPathResolve())) return null;
-  return loadConfig();
+  try {
+    return await loadConfig();
+  } catch (err) {
+    if (err instanceof ConfigNotFoundError) return null;
+    throw err;
+  }
 }
 
 /**
@@ -331,12 +352,8 @@ export function updateConfig(mutator: (config: Config) => void): Promise<Config>
  */
 export async function removeAccountsForConnection(connectionId: string): Promise<Account[]> {
   return withStateLock(async () => {
-    let config: Config;
-    try {
-      config = await loadConfig();
-    } catch {
-      return [];
-    }
+    const config = await loadConfigIfExists();
+    if (!config) return [];
 
     const remaining = config.accounts.filter((a) => a.connectionId !== connectionId);
     if (remaining.length !== config.accounts.length) {
@@ -353,12 +370,9 @@ export async function removeAccountsForConnection(connectionId: string): Promise
  * budget when no config exists yet. Used by the web dashboard pairing flow.
  */
 export async function listBudgets(): Promise<Budget[]> {
-  try {
-    const config = await loadConfig();
-    if (config.budgets.length > 0) return config.budgets;
-  } catch {
-    // No config yet — fall through to the env fallback.
-  }
+  const config = await loadConfigIfExists();
+  if (config && config.budgets.length > 0) return config.budgets;
+
   const envBudget = budgetFromEnv();
   return envBudget ? [envBudget] : [];
 }
@@ -371,11 +385,7 @@ export async function addBudget(budget: Budget): Promise<Budget[]> {
   return withStateLock(async () => {
     // Only a missing file starts fresh; a corrupt config must throw rather
     // than be overwritten (which would wipe the account mappings).
-    const config: Config = (await loadConfigIfExists()) ?? {
-      budgets: [],
-      accounts: [],
-      createdAt: new Date().toISOString(),
-    };
+    const config: Config = (await loadConfigIfExists()) ?? emptyConfig();
 
     const clash = findBudgetBySyncId(config.budgets, budget.syncId, budget.id);
     if (clash) throw new DuplicateSyncIdError(budget.syncId, clash);
@@ -409,6 +419,12 @@ export interface ReconcileResult {
  * Repoint existing mappings at a (possibly new) connection id after re-auth,
  * without touching pairings or `lastSyncedAt`. Pure helper so the risky part
  * of the callback is unit-testable.
+ *
+ * Deliberately repoints accounts the new consent did *not* return as well
+ * (they are reported in `missing`). A bank can omit an account it will list
+ * again later, so the pairing is preserved rather than dropped; callers log
+ * the omission. This means a genuinely closed account keeps its mapping and
+ * may fail to fetch each sync until the user removes it.
  */
 export function reconcileConfigAccounts(
   accounts: Account[],

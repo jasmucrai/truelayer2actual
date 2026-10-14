@@ -72,12 +72,7 @@ function asString(value: unknown): string | undefined {
 async function buildConnectionViews(): Promise<ConnectionView[]> {
   const connections = loadAllConnections();
 
-  let accounts: Config['accounts'] = [];
-  try {
-    accounts = (await loadConfigIfExists())?.accounts ?? [];
-  } catch {
-    accounts = [];
-  }
+  const accounts = (await loadConfigIfExists())?.accounts ?? [];
 
   return Object.entries(connections).map(([id, tokens]) => {
     const mine = accounts.filter((a) => a.connectionId === id);
@@ -813,9 +808,15 @@ export function createApp(): Express {
   );
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    logger.error('HTTP request failed:', err.message);
-    res.status(500).send(messagePage('Something went wrong', err.message, { error: true }));
+  app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+    logger.error(`HTTP ${req.method} ${req.path} failed:`, err.message);
+    res.status(500).send(
+      messagePage(
+        'Something went wrong',
+        'An unexpected error occurred. Check the server logs for details.',
+        { error: true }
+      )
+    );
   });
 
   return app;
