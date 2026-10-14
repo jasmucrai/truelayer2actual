@@ -22,7 +22,6 @@ import {
   mergeAccounts,
   reconcileConfigAccounts,
   type Config,
-  budgetFromEnv,
   type Account,
 } from '../config.js';
 import { withStateLock } from '../util/lock.js';
@@ -72,8 +71,6 @@ export interface PairingItem {
   name: string;
   accountKind: 'account' | 'card';
   currency: string;
-  /** Budget this account is already paired with, preselected on the pairing page. */
-  budgetId?: string;
 }
 
 export interface PairingSession {
@@ -82,15 +79,12 @@ export interface PairingSession {
   mode: 'new' | 'reauth';
   provider: string;
   items: PairingItem[];
-  /** Non-fatal problem to surface on the pairing page (e.g. unreadable config). */
-  warning?: string;
   createdAt: number;
 }
 
 const pairingSessions = new Map<string, PairingSession>();
 
-/** Exported so tests can build a pairing session without running the OAuth flow. */
-export function setPairing(session: Omit<PairingSession, 'createdAt'>): string {
+function setPairing(session: Omit<PairingSession, 'createdAt'>): string {
   const id = crypto.randomBytes(12).toString('hex');
   pairingSessions.set(id, { ...session, createdAt: Date.now() });
   return id;
@@ -101,17 +95,6 @@ function consumePairing(id: string): PairingSession | undefined {
   if (!session) return undefined;
   pairingSessions.delete(id);
   if (Date.now() - session.createdAt > PENDING_TTL_MS) return undefined;
-  return session;
-}
-
-/** Non-consuming lookup so a pairing can span multiple requests. */
-export function getPairingSession(id: string): PairingSession | undefined {
-  const session = pairingSessions.get(id);
-  if (!session) return undefined;
-  if (Date.now() - session.createdAt > PENDING_TTL_MS) {
-    pairingSessions.delete(id);
-    return undefined;
-  }
   return session;
 }
 
@@ -348,7 +331,6 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
     mode: pending.mode,
     provider,
     items: unmapped,
-    warning: configError,
   };
   const pairingId = setPairing(sessionBase);
   return {
@@ -367,14 +349,9 @@ export interface SavePairingsResult {
   saved: number;
 }
 
-export interface PairingSelection {
-  budgetId: string;
-  actualAccountId: string;
-}
-
 export async function savePairings(
   pairingId: string,
-  selections: Record<string, PairingSelection>
+  mapping: Record<string, string>
 ): Promise<SavePairingsResult> {
   return withStateLock(async () => {
     // A config.json that exists but fails to load is a hard error: merging
@@ -396,21 +373,6 @@ export async function savePairings(
       );
     }
 
-    let budgets = existingConfig?.budgets ?? [];
-    if (budgets.length === 0) {
-      const envBudget = budgetFromEnv();
-      if (envBudget) budgets = [envBudget];
-    }
-
-    // Reject unknown budget ids before consuming the pairing session so the
-    // user can correct the form and resubmit.
-    const knownBudgets = new Set(budgets.map((b) => b.id));
-    for (const selection of Object.values(selections)) {
-      if (!knownBudgets.has(selection.budgetId)) {
-        throw new Error('Unknown budget selected; pairings were not saved. Reload the page and try again.');
-      }
-    }
-
     const session = consumePairing(pairingId);
     if (!session) {
       throw new Error('Pairing session expired. Start again from the dashboard.');
@@ -418,22 +380,20 @@ export async function savePairings(
 
     const incoming: Account[] = [];
     for (const item of session.items) {
-      const selection = selections[item.truelayerAccountId];
-      if (!selection) continue;
+      const actualAccountId = mapping[item.truelayerAccountId];
+      if (!actualAccountId) continue;
       incoming.push({
         name: item.name,
         connectionId: session.connectionId,
-        budgetId: selection.budgetId,
         accountKind: item.accountKind,
         truelayerAccountId: item.truelayerAccountId,
-        actualAccountId: selection.actualAccountId,
+        actualAccountId,
         currency: item.currency,
       });
     }
 
     const merged = mergeAccounts(existingConfig?.accounts ?? [], incoming);
     await saveConfig({
-      budgets,
       accounts: merged,
       createdAt: existingConfig?.createdAt ?? new Date().toISOString(),
     });

@@ -222,7 +222,7 @@ describe('savePairings', () => {
     if (outcome.type !== 'pair') return;
 
     await assert.rejects(
-      () => savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } }),
+      () => savePairings(outcome.pairingId, { tl_new: 'actual_1' }),
       /Config file could not be loaded/
     );
 
@@ -241,59 +241,15 @@ describe('savePairings', () => {
     assert.equal(outcome.type, 'pair');
     if (outcome.type !== 'pair') return;
 
-    await assert.rejects(() => savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } }));
+    await assert.rejects(() => savePairings(outcome.pairingId, { tl_new: 'actual_1' }));
 
     // Fix the config and retry — the session must still be alive.
     fs.writeFileSync(
       configPath,
-      JSON.stringify({
-        budgets: [{ id: 'default', name: 'Default', syncId: 'sync-1' }],
-        accounts: [],
-        createdAt: new Date().toISOString(),
-      })
+      JSON.stringify({ accounts: [], createdAt: new Date().toISOString() })
     );
 
-    const result = await savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } });
+    const result = await savePairings(outcome.pairingId, { tl_new: 'actual_1' });
     assert.equal(result.saved, 1);
-  });
-});
-
-describe('savePairings with an unknown budget', () => {
-  it('rejects, writes nothing, keeps the session, and a retry with a valid id works', async () => {
-    resetFiles();
-    installHappyPathResponder();
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({
-        budgets: [{ id: 'budget_1', name: 'Joint', syncId: 'sync-1' }],
-        accounts: [],
-        createdAt: '2026-01-01T00:00:00.000Z',
-      })
-    );
-    setPending('state_unknown_budget', { mode: 'new' });
-    const outcome = await processCallback({ code: 'abc', state: 'state_unknown_budget' });
-    assert.equal(outcome.type, 'pair');
-    if (outcome.type !== 'pair') return;
-
-    const configBefore = fs.readFileSync(configPath, 'utf-8');
-    const tokensBefore = fs.readFileSync(tokensPath, 'utf-8');
-
-    await assert.rejects(
-      () => savePairings(outcome.pairingId, { tl_new: { budgetId: 'budget_nope', actualAccountId: 'actual_1' } }),
-      /Unknown budget/
-    );
-
-    // Nothing written, and no stale-connection pruning ran.
-    assert.equal(fs.readFileSync(configPath, 'utf-8'), configBefore);
-    assert.equal(fs.readFileSync(tokensPath, 'utf-8'), tokensBefore);
-
-    // The session was not consumed: retrying with a valid budget id succeeds.
-    const result = await savePairings(outcome.pairingId, {
-      tl_new: { budgetId: 'budget_1', actualAccountId: 'actual_1' },
-    });
-    assert.equal(result.saved, 1);
-    const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    assert.equal(saved.accounts[0].budgetId, 'budget_1');
-    assert.equal(saved.budgets.length, 1);
   });
 });

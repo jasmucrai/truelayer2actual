@@ -1,6 +1,4 @@
-import { createHash } from 'crypto';
 import type { ActualAccount } from '../clients/actual.js';
-import type { Budget } from '../config.js';
 import type { PairingItem } from './oauth.js';
 
 export function escapeHtml(value: string): string {
@@ -153,126 +151,53 @@ export function dashboardPage(data: DashboardData): string {
   );
 }
 
-/**
- * Progressive-enhancement script for the pairing page: filters each account
- * select to the chosen budget. The dashboard CSP forbids scripts by default;
- * the server allows exactly this one on /pair/* via its hash.
- */
-const PAIRING_SCRIPT = `
-  (function () {
-    function sync(budgetSelect) {
-      var target = document.getElementById(budgetSelect.getAttribute('data-target'));
-      if (!target) return;
-      var budgetId = budgetSelect.value;
-      Array.prototype.forEach.call(target.options, function (o) {
-        if (o.value === '') return;
-        o.hidden = o.getAttribute('data-budget') !== budgetId;
-      });
-      var selected = target.options[target.selectedIndex];
-      if (selected && selected.hidden) target.value = '';
-    }
-    var selects = document.querySelectorAll('select.budget');
-    Array.prototype.forEach.call(selects, function (s) {
-      s.addEventListener('change', function () { sync(s); });
-      sync(s);
-    });
-  })();
-  `;
-
-export const PAIRING_SCRIPT_CSP_SOURCE = `'sha256-${createHash('sha256').update(PAIRING_SCRIPT).digest('base64')}'`;
-
-export interface BudgetAccounts {
-  budget: Budget;
-  accounts: ActualAccount[];
-}
-
 export interface PairingPageOptions {
   pairingId: string;
   provider: string;
   items: PairingItem[];
-  budgetAccounts: BudgetAccounts[];
+  actualAccounts: ActualAccount[];
   message?: string;
-  /** Shown as an error banner, e.g. two budgets sharing one sync id. */
   warning?: string;
 }
 
 export function pairingPage(options: PairingPageOptions): string {
-  const budgetOptionsFor = (selectedId?: string): string => {
-    const selected = options.budgetAccounts.some((b) => b.budget.id === selectedId)
-      ? selectedId
-      : options.budgetAccounts[0]?.budget.id;
-    return options.budgetAccounts
-      .map(
-        (b) =>
-          `<option value="${escapeHtml(b.budget.id)}"${b.budget.id === selected ? ' selected' : ''}>` +
-          `${escapeHtml(b.budget.name)}</option>`
-      )
-      .join('');
-  };
-
   const rows = options.items
     .map((item) => {
       const kind = item.accountKind === 'card' ? 'card' : 'account';
-      const accountSelectId = `acct_${item.truelayerAccountId}`;
-      const budgetSelectName = `budget_${item.truelayerAccountId}`;
-      const mapSelectName = `map_${item.truelayerAccountId}`;
-
-      const accountOptions = options.budgetAccounts
-        .flatMap(({ budget, accounts }) =>
-          accounts.map(
-            (a) =>
-              `<option value="${escapeHtml(a.id)}" data-budget="${escapeHtml(budget.id)}">` +
-              `${escapeHtml(budget.name)} / ${escapeHtml(a.name)}` +
-              `${a.offbudget ? ' (off-budget)' : ''}</option>`
-          )
+      const selectName = `map_${item.truelayerAccountId}`;
+      const opts = options.actualAccounts
+        .map(
+          (a) =>
+            `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}${
+              a.offbudget ? ' (off-budget)' : ''
+            }</option>`
         )
         .join('');
-
       return `<tr>
         <td>${escapeHtml(item.name)}<div class="muted">${escapeHtml(item.currency)} &middot; ${escapeHtml(kind)}</div></td>
         <td>
-          <select name="${escapeHtml(budgetSelectName)}" class="budget" data-target="${escapeHtml(accountSelectId)}">${budgetOptionsFor(item.budgetId)}</select>
-          <select name="${escapeHtml(mapSelectName)}" id="${escapeHtml(accountSelectId)}" class="account">
+          <select name="${escapeHtml(selectName)}">
             <option value="">— skip —</option>
-            ${accountOptions}
+            ${opts}
           </select>
         </td>
       </tr>`;
     })
     .join('');
 
-  const noBudgets = options.budgetAccounts.length === 0
-    ? '<p class="muted">No budgets configured yet — add one below.</p>'
-    : '';
-
-  const script = `<script>${PAIRING_SCRIPT}</script>`;
-
   return layout(
     'Pair accounts',
     `     <h1>Pair ${escapeHtml(options.provider)} accounts</h1>
      ${options.warning ? `<div class="error">${escapeHtml(options.warning)}</div>` : ''}
      ${options.message ? `<div class="banner">${escapeHtml(options.message)}</div>` : ''}
-     <p>For each bank account, pick the Actual budget, then the matching account. Leave anything you do not want to import set to "skip".</p>
-     ${noBudgets}
+     <p>Choose the matching Actual Budget account for each bank account. Leave anything you do not want to import set to "skip".</p>
      <form method="post" action="/pair">
        <input type="hidden" name="pairingId" value="${escapeHtml(options.pairingId)}">
-       <noscript><p class="muted">JavaScript is off, so every account is listed. Each Actual account you choose must belong to the budget selected beside it, otherwise sync will fail for that account.</p></noscript>
        <table>
-         <thead><tr><th>TrueLayer</th><th>Budget &middot; Actual account</th></tr></thead>
+         <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>
        <div class="row"><button class="primary" type="submit">Save pairings</button></div>
-     </form>
-     <h2>Add a budget</h2>
-     <form method="post" action="/budgets">
-       <input type="hidden" name="pairingId" value="${escapeHtml(options.pairingId)}">
-       <div class="row">
-         <input type="text" name="name" placeholder="Budget name" required>
-         <input type="text" name="syncId" placeholder="Sync ID" required>
-         <input type="password" name="encryptionPassword" placeholder="Encryption password (optional)">
-         <button class="primary" type="submit">Add budget</button>
-       </div>
-     </form>
-     ${script}`
+     </form>`
   );
 }
