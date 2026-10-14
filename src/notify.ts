@@ -65,6 +65,19 @@ export async function notify(options: NotifyOptions): Promise<boolean> {
   return delivered > 0;
 }
 
+/** Whether a notification for `reason` was already sent within the dedupe window. */
+export function isDuplicateNotification(
+  lastNotifiedAt: string | undefined,
+  lastNotifiedReason: string | undefined,
+  reason: string,
+  nowMs = Date.now()
+): boolean {
+  const last = lastNotifiedAt ? Date.parse(lastNotifiedAt) : NaN;
+  return (
+    Number.isFinite(last) && nowMs - last < DEDUPE_WINDOW_MS && lastNotifiedReason === reason
+  );
+}
+
 /**
  * Send a notification for a connection at most once per 24h *per reason*,
  * recording the time/reason in tokens.json so restarts don't cause a
@@ -84,9 +97,7 @@ export async function notifyConnection(
     await withStateLock(async () => {
       const current = getConnection(connectionId);
       if (!current) return;
-      const last = current.lastNotifiedAt ? Date.parse(current.lastNotifiedAt) : NaN;
-      const sameReason = current.lastNotifiedReason === reason;
-      if (Number.isFinite(last) && Date.now() - last < DEDUPE_WINDOW_MS && sameReason) {
+      if (isDuplicateNotification(current.lastNotifiedAt, current.lastNotifiedReason, reason)) {
         logger.debug(`[${connectionId}] Suppressing duplicate ${reason} notification`);
         return;
       }
