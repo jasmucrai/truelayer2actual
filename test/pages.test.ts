@@ -77,14 +77,82 @@ describe('pairingPage', () => {
           currency: 'GBP',
         },
       ],
-      actualAccounts: [{ id: 'a"1', name: 'Savings <x>', offbudget: false, closed: false }],
+      budgetAccounts: [
+        {
+          budget: { id: 'b"1', name: 'Home <b>', syncId: 'sync' },
+          accounts: [{ id: 'a"1', name: 'Savings <x>', offbudget: false, closed: false }],
+        },
+      ],
       message: '<b>banner</b>',
       warning: '<script>alert(2)</script>',
     });
-    assert.equal(html.includes('<script>'), false);
+    assert.equal(html.includes('<script>alert'), false);
+    assert.equal(html.includes('Home <b>'), false);
     assert.equal(html.includes('<b>banner</b>'), false);
     assert.ok(html.includes('&lt;script&gt;'));
     assert.ok(html.includes('Current &lt;account&gt;'));
+  });
+});
+
+describe('pairingPage budgets', () => {
+  const items = [
+    { truelayerAccountId: 'tl1', name: 'Current', accountKind: 'account' as const, currency: 'GBP' },
+    { truelayerAccountId: 'tl2', name: 'Card', accountKind: 'card' as const, currency: 'GBP' },
+  ];
+  const budgetAccounts = [
+    {
+      budget: { id: 'default', name: 'Default', syncId: 's1' },
+      accounts: [{ id: 'a1', name: 'Main', offbudget: false, closed: false }],
+    },
+    {
+      budget: { id: 'budget_2', name: 'Joint <b>', syncId: 's2' },
+      accounts: [{ id: 'a2', name: 'Shared', offbudget: true, closed: false }],
+    },
+  ];
+  const base = { pairingId: 'p1', provider: 'Monzo', items, budgetAccounts };
+
+  it('renders a budget selector per bank account with every budget, default first', () => {
+    const html = pairingPage(base);
+    assert.equal((html.match(/<select name="budget_tl\d" class="budget"/g) ?? []).length, 2);
+    assert.ok(html.includes('name="budget_tl1"'));
+    assert.ok(html.includes('data-target="acct_tl1"'));
+    const first = html.indexOf('<option value="default" selected>Default</option>');
+    const second = html.indexOf('<option value="budget_2">Joint &lt;b&gt;</option>');
+    assert.ok(first !== -1 && second > first, 'default budget option listed first');
+    assert.equal(html.includes('Joint <b>'), false);
+  });
+
+  it('tags each Actual account option with its budget and labels off-budget accounts', () => {
+    const html = pairingPage(base);
+    assert.ok(html.includes('value="a1" data-budget="default">Default / Main</option>'));
+    assert.ok(html.includes('data-budget="budget_2">Joint &lt;b&gt; / Shared (off-budget)</option>'));
+  });
+
+  it('always renders the add-budget form, carrying the pairing id', () => {
+    for (const html of [pairingPage(base), pairingPage({ ...base, budgetAccounts: [] })]) {
+      assert.ok(html.includes('<form method="post" action="/budgets">'));
+      assert.ok(html.includes('name="syncId"'));
+      assert.ok(html.includes('name="encryptionPassword"'));
+      assert.match(html, /action="\/budgets">\s*<input type="hidden" name="pairingId" value="p1">/);
+    }
+  });
+
+  it('tells the user to add a budget when none are configured', () => {
+    assert.match(pairingPage({ ...base, budgetAccounts: [] }), /No budgets configured yet/);
+    assert.doesNotMatch(pairingPage(base), /No budgets configured yet/);
+  });
+
+  it('shows the joined, escaped warning exactly once', () => {
+    const warning = 'Session <i>warn</i>. Duplicate "sync" id. Err & more';
+    const html = pairingPage({ ...base, warning });
+    assert.equal(html.includes('<i>'), false);
+    const escaped = 'Session &lt;i&gt;warn&lt;/i&gt;. Duplicate &quot;sync&quot; id. Err &amp; more';
+    assert.equal(html.split(escaped).length - 1, 1);
+    assert.ok(html.includes(`<div class="error">${escaped}</div>`));
+  });
+
+  it('omits the warning banner when there is no warning', () => {
+    assert.equal(pairingPage(base).includes('<div class="error">'), false);
   });
 });
 
@@ -136,5 +204,35 @@ describe('reauthWarnDays', () => {
   after(() => {
     if (original === undefined) delete process.env.REAUTH_WARN_DAYS;
     else process.env.REAUTH_WARN_DAYS = original;
+  });
+});
+
+describe('pairingPage budget selection', () => {
+  const budgetAccounts = [
+    { budget: { id: 'b1', name: 'First', syncId: 's1' }, accounts: [] },
+    { budget: { id: 'b"2', name: 'Second', syncId: 's2' }, accounts: [] },
+  ];
+  const base = { truelayerAccountId: 'tl1', name: 'Current', accountKind: 'account' as const, currency: 'GBP' };
+
+  it('selects the first (default) budget when unpaired', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [base], budgetAccounts });
+    assert.ok(html.includes('<option value="b1" selected>First</option>'));
+    assert.equal(html.includes('selected>Second'), false);
+  });
+
+  it('selects the existing budget, escaped', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [{ ...base, budgetId: 'b"2' }], budgetAccounts });
+    assert.ok(html.includes('<option value="b&quot;2" selected>Second</option>'));
+    assert.equal(html.includes('value="b1" selected'), false);
+  });
+
+  it('falls back to the default when the existing budget is unknown', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [{ ...base, budgetId: 'gone' }], budgetAccounts });
+    assert.ok(html.includes('value="b1" selected'));
+  });
+
+  it('warns without JavaScript that accounts must match the budget', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [base], budgetAccounts });
+    assert.match(html, /<noscript>[^]*must belong to the budget selected/);
   });
 });
