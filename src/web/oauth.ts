@@ -76,6 +76,27 @@ export interface PairingItem {
   budgetId?: string;
 }
 
+/** Flatten a TrueLayer accounts+cards response into the rows the pairing UI uses. */
+export function toPairingItems(result: {
+  accounts: { account_id: string; display_name: string; currency: string }[];
+  cards: { account_id: string; display_name: string; currency: string }[];
+}): PairingItem[] {
+  return [
+    ...result.accounts.map((a) => ({
+      truelayerAccountId: a.account_id,
+      name: a.display_name,
+      accountKind: 'account' as const,
+      currency: a.currency,
+    })),
+    ...result.cards.map((c) => ({
+      truelayerAccountId: c.account_id,
+      name: c.display_name,
+      accountKind: 'card' as const,
+      currency: c.currency,
+    })),
+  ];
+}
+
 export interface PairingSession {
   connectionId: string;
   previousConnectionId?: string;
@@ -264,20 +285,7 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
       ? pending.connectionId
       : generateConnectionId();
 
-  const items: PairingItem[] = [
-    ...accounts.map((a) => ({
-      truelayerAccountId: a.account_id,
-      name: a.display_name,
-      accountKind: 'account' as const,
-      currency: a.currency,
-    })),
-    ...cards.map((c) => ({
-      truelayerAccountId: c.account_id,
-      name: c.display_name,
-      accountKind: 'card' as const,
-      currency: c.currency,
-    })),
-  ];
+  const items: PairingItem[] = toPairingItems({ accounts, cards });
 
   const fetchedIds = new Set(items.map((i) => i.truelayerAccountId));
 

@@ -35,7 +35,7 @@ import { logger } from '../logger.js';
 import type { Account, Budget, Config } from '../config.js';
 
 /** Prevents two full syncs from overlapping (token rotation, double import). */
-const withSyncLock = createMutex();
+export const withSyncLock = createMutex();
 
 // ---------------------------------------------------------------------------
 // Date helpers
