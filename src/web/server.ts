@@ -6,38 +6,55 @@ import express, {
   type Request,
   type Response,
 } from 'express';
-import { loadAllConnections, getConnection, deleteConnection } from '../auth/tokens.js';
+import {
+  loadAllConnections,
+  getConnection,
+  deleteConnection,
+  refreshConnectionIfNeeded,
+} from '../auth/tokens.js';
 import {
   loadConfigIfExists,
+  saveConfig,
+  budgetFromEnv,
+  applyPairingChanges,
   reauthWarnDays,
   removeAccountsForConnection,
   listBudgets,
   addBudget,
   generateBudgetId,
+  type Account,
+  type Budget,
   type Config,
+  type PairingChange,
   duplicateSyncIdGroups,
   DuplicateSyncIdError,
 } from '../config.js';
+import { fetchTrueLayerAccounts } from '../auth/oauth.js';
 import { withBudget, getActualAccounts, getActualError } from '../clients/actual.js';
-import { runSync } from '../commands/sync.js';
+import { runSync, withSyncLock } from '../commands/sync.js';
 import {
   startNewAuth,
   startReauth,
   processCallback,
   savePairings,
   getPairingSession,
+  toPairingItems,
+  type PairingItem,
   type PairingSelection,
 } from './oauth.js';
 import {
   dashboardPage,
   pairingPage,
+  editPairingsPage,
   PAIRING_SCRIPT_CSP_SOURCE,
   messagePage,
   confirmDeletePage,
   type BudgetAccounts,
   type ConnectionStatus,
   type ConnectionView,
+  type PairingRow,
 } from './pages.js';
+import { withStateLock } from '../util/lock.js';
 import { logger } from '../logger.js';
 
 function asyncHandler(
@@ -156,6 +173,108 @@ export function hostAllowed(hostHeader: string | undefined): boolean {
 }
 
 /**
+ * Load the Actual accounts for each budget, skipping any budget that fails so a
+ * single unreachable budget does not blank the whole pairing page.
+ */
+async function loadBudgetAccounts(budgets: Budget[]): Promise<BudgetAccounts[]> {
+  const budgetAccounts: BudgetAccounts[] = [];
+  for (const budget of budgets) {
+    try {
+      const accounts = await withBudget(budget, () => getActualAccounts());
+      budgetAccounts.push({ budget, accounts });
+    } catch (err) {
+      logger.warn(
+        `Could not load accounts for budget "${budget.name}":`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+  return budgetAccounts;
+}
+
+/**
+ * Fetch the accounts/cards TrueLayer currently reports for a connection using
+ * its saved token. Never throws: when the consent has lapsed, the tokens are
+ * missing, or TrueLayer is unreachable, `items` is undefined and `note`
+ * explains why. A token refresh is serialised with syncs (refresh tokens may
+ * rotate, so two concurrent refreshes could kill the connection).
+ */
+async function fetchLivePairingItems(
+  connectionId: string
+): Promise<{ items?: PairingItem[]; note?: string }> {
+  const connection = getConnection(connectionId);
+  if (!connection) {
+    return { note: 'Connection tokens are missing; showing saved pairings only.' };
+  }
+  if (connection.needsReauth) {
+    return {
+      note: 'This connection needs reconnecting. Showing saved pairings only; reconnect to add or refresh accounts.',
+    };
+  }
+  try {
+    const stillValid = Date.now() < new Date(connection.expiresAt).getTime() - 60_000;
+    const accessToken = stillValid
+      ? connection.accessToken
+      : await withSyncLock(async () => {
+          const fresh = getConnection(connectionId);
+          if (!fresh) throw new Error('connection was deleted');
+          return refreshConnectionIfNeeded(connectionId, fresh);
+        });
+    const { accounts, cards } = await fetchTrueLayerAccounts(accessToken);
+    return { items: toPairingItems({ accounts, cards }) };
+  } catch (err) {
+    return {
+      note: `Could not load accounts from TrueLayer (${
+        err instanceof Error ? err.message : String(err)
+      }). Showing saved pairings only.`,
+    };
+  }
+}
+
+/**
+ * Merge the accounts TrueLayer currently reports for a connection with any
+ * saved mappings, so the editor can both change and (un)assign accounts. A
+ * missing/expired consent or an unreachable API degrades to saved-only rows
+ * with an explanatory note instead of an error page.
+ */
+async function loadPairingRows(
+  connectionId: string,
+  savedAccounts: Account[]
+): Promise<{ rows: PairingRow[]; note?: string }> {
+  const savedByTlId = new Map(savedAccounts.map((a) => [a.truelayerAccountId, a]));
+  const live = await fetchLivePairingItems(connectionId);
+  const items = live.items ?? [];
+  const note = live.note;
+
+  const rows: PairingRow[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    seen.add(item.truelayerAccountId);
+    const saved = savedByTlId.get(item.truelayerAccountId);
+    rows.push({
+      ...item,
+      mapped: Boolean(saved),
+      budgetId: saved?.budgetId,
+      actualAccountId: saved?.actualAccountId,
+    });
+  }
+  for (const saved of savedAccounts) {
+    if (seen.has(saved.truelayerAccountId)) continue;
+    rows.push({
+      truelayerAccountId: saved.truelayerAccountId,
+      name: saved.name,
+      accountKind: saved.accountKind,
+      currency: saved.currency,
+      mapped: true,
+      budgetId: saved.budgetId,
+      actualAccountId: saved.actualAccountId,
+    });
+  }
+
+  return { rows, note };
+}
+
+/**
  * CSRF hardening for the unauthenticated state-changing POST routes: reject
  * requests whose Origin is neither the request host nor DASHBOARD_URL. Requests
  * without an Origin (curl, older clients) are allowed; `Sec-Fetch-Site` is used
@@ -222,7 +341,8 @@ export function createApp(): Express {
     if (!req.path.startsWith('/healthz')) {
       // The pairing page alone ships one inline script (budget -> account
       // filter), allowed by hash; every other page stays script-free.
-      const scriptSrc = req.path.startsWith('/pair/') ? `script-src ${PAIRING_SCRIPT_CSP_SOURCE}; ` : '';
+      const scriptSrc = req.path.startsWith('/pair/') || /^\/connections\/[^/]+\/pairings$/.test(req.path)
+        ? `script-src ${PAIRING_SCRIPT_CSP_SOURCE}; ` : '';
       res.setHeader(
         'Content-Security-Policy',
         `default-src 'none'; ${scriptSrc}style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'`
@@ -418,6 +538,189 @@ export function createApp(): Express {
               ? 'Reconnected. Confirm any new accounts below.'
               : undefined,
         })
+      );
+    })
+  );
+
+  app.get(
+    '/connections/:id/pairings',
+    asyncHandler(async (req, res) => {
+      const connectionId = req.params.id;
+      const connection = getConnection(connectionId);
+      if (!connection) {
+        res.status(404).send(messagePage('Unknown connection', connectionId, { error: true }));
+        return;
+      }
+
+      let accounts: Account[] = [];
+      try {
+        accounts = ((await loadConfigIfExists())?.accounts ?? []).filter(
+          (a) => a.connectionId === connectionId
+        );
+      } catch (err) {
+        logger.warn('Could not read config.json for pairings:', err instanceof Error ? err.message : String(err));
+      }
+
+      const budgets = await listBudgets();
+      const [budgetAccounts, pairing] = await Promise.all([
+        loadBudgetAccounts(budgets),
+        loadPairingRows(connectionId, accounts),
+      ]);
+
+      res.send(
+        editPairingsPage({
+          connectionId,
+          provider: connection.providerDisplayName ?? connection.providerId ?? connectionId,
+          rows: pairing.rows,
+          budgetAccounts,
+          note: pairing.note,
+          message: asString(req.query.msg),
+          warning:
+            [duplicateSyncIdWarning(budgets), asString(req.query.err)]
+              .filter((w): w is string => Boolean(w))
+              .join(' ') || undefined,
+        })
+      );
+    })
+  );
+
+  app.post(
+    '/connections/:id/pairings',
+    asyncHandler(async (req, res) => {
+      const connectionId = req.params.id;
+      if (!getConnection(connectionId)) {
+        res.status(404).send(messagePage('Unknown connection', connectionId, { error: true }));
+        return;
+      }
+
+      // Parse the submitted rows once. Only `map_<tlId>` keys count; everything
+      // else (names, currencies) is advisory and never trusted for new rows.
+      const body: Record<string, unknown> = req.body ?? {};
+      const submitted = new Map<string, { actualAccountId: string; budgetId?: string }>();
+      for (const key of Object.keys(body)) {
+        if (!key.startsWith('map_')) continue;
+        const truelayerAccountId = key.slice('map_'.length);
+        submitted.set(truelayerAccountId, {
+          actualAccountId: asString(body[key]) ?? '',
+          budgetId: asString(body[`budget_${truelayerAccountId}`]),
+        });
+      }
+
+      // Pairing a previously skipped account needs TrueLayer to vouch for it.
+      // Fetch outside the state lock: the token refresh takes that lock itself.
+      let liveById: Map<string, PairingItem> | undefined;
+      let existingIds = new Set<string>();
+      try {
+        const current = await loadConfigIfExists();
+        existingIds = new Set(
+          (current?.accounts ?? [])
+            .filter((a) => a.connectionId === connectionId)
+            .map((a) => a.truelayerAccountId)
+        );
+      } catch {
+        // A corrupt config is reported by the locked write below.
+      }
+      const wantsNew = [...submitted].some(
+        ([id, row]) => row.actualAccountId && !existingIds.has(id)
+      );
+      if (wantsNew) {
+        const live = await fetchLivePairingItems(connectionId);
+        if (live.items) liveById = new Map(live.items.map((i) => [i.truelayerAccountId, i]));
+      }
+
+      let changed = 0;
+      let removed = 0;
+      let ignored = 0;
+      try {
+        await withStateLock(async () => {
+          // Re-read inside the lock so concurrent writers (sync recording
+          // lastSyncedAt, other dashboard edits) are not clobbered.
+          const loaded = await loadConfigIfExists();
+          const envBudget = budgetFromEnv();
+          const config: Config = loaded ?? {
+            budgets: envBudget ? [envBudget] : [],
+            accounts: [],
+            createdAt: new Date().toISOString(),
+          };
+          const budgetIds = new Set(config.budgets.map((b) => b.id));
+
+          const existingByTlId = new Map(
+            config.accounts
+              .filter((a) => a.connectionId === connectionId)
+              .map((a) => [a.truelayerAccountId, a])
+          );
+          const changes: Record<string, PairingChange> = Object.create(null);
+          const added: Account[] = [];
+
+          for (const [truelayerAccountId, row] of submitted) {
+            const existing = existingByTlId.get(truelayerAccountId);
+
+            if (!row.actualAccountId) {
+              // Blank means "do not sync": drop an existing mapping, ignore a new row.
+              if (existing) {
+                changes[truelayerAccountId] = { budgetId: existing.budgetId, actualAccountId: '' };
+              }
+              continue;
+            }
+
+            if (!row.budgetId) continue;
+            const unchanged =
+              existing?.budgetId === row.budgetId &&
+              existing.actualAccountId === row.actualAccountId;
+            if (!unchanged && !budgetIds.has(row.budgetId)) {
+              ignored++;
+              continue;
+            }
+
+            if (existing) {
+              changes[truelayerAccountId] = {
+                budgetId: row.budgetId,
+                actualAccountId: row.actualAccountId,
+              };
+              continue;
+            }
+
+            const item = liveById?.get(truelayerAccountId);
+            if (!item) {
+              ignored++;
+              continue;
+            }
+            added.push({
+              name: item.name,
+              connectionId,
+              budgetId: row.budgetId,
+              accountKind: item.accountKind,
+              truelayerAccountId,
+              actualAccountId: row.actualAccountId,
+              currency: item.currency,
+            });
+          }
+
+          const result = applyPairingChanges(config.accounts, connectionId, changes);
+          changed = result.changed + added.length;
+          removed = result.removed;
+          if (changed === 0 && removed === 0) return;
+
+          await saveConfig({
+            ...config,
+            accounts: [...result.accounts, ...added],
+          });
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error('Failed to update pairings:', message);
+        res.redirect('/?err=' + encodeURIComponent(message));
+        return;
+      }
+
+      const parts = [`Updated ${changed} pairing(s)`];
+      if (removed > 0) parts.push(`removed ${removed}`);
+      if (ignored > 0) parts.push(`ignored ${ignored} invalid selection(s)`);
+      res.redirect(
+        '/connections/' +
+          encodeURIComponent(connectionId) +
+          '/pairings?msg=' +
+          encodeURIComponent(parts.join(', ') + '.')
       );
     })
   );
