@@ -62,7 +62,7 @@ TRUELAYER_REDIRECT_URI=http://192.168.1.73:3000/callback
 # Actual Budget
 ACTUAL_SERVER_URL=http://your-nas:5006
 ACTUAL_PASSWORD=
-ACTUAL_SYNC_ID=                     # default budget sync id (optional if you add budgets during setup)
+ACTUAL_SYNC_ID=                     # found in Actual → Settings → Advanced
 ACTUAL_ENCRYPTION_PASSWORD=         # optional — only if E2E encryption is enabled
 
 # If Actual is served over HTTPS with a self-signed certificate, trust just
@@ -177,26 +177,6 @@ docker compose run --rm -p 3000:3000 truelayer2actual node dist/commands/setup.j
 > port mapping will conflict.
 
 This opens a browser for TrueLayer OAuth, then prompts you to map each bank account/card to an Actual account. Supports multiple banks — you'll be asked after each one if you want to add another.
-
-### Multiple budgets
-
-You can sync into more than one Actual budget (e.g. a personal and a joint budget on the
-same server). All budgets share `ACTUAL_SERVER_URL` and `ACTUAL_PASSWORD`; the sync id (and,
-optionally, an E2E encryption password) differs per budget.
-
-- **CLI setup** (`npm run setup`): you are prompted to add budgets (name + sync id + optional
-  encryption password), then for each bank account/card you choose *which budget* before pairing
-  *which account* - so a single bank connection can span multiple budgets.
-- **Dashboard** (`npm run serve`): after authorising a bank, each account row has its own budget
-  selector next to the account selector. You can also add budgets directly from the pairing page
-  (including an optional encryption password).
-
-`ACTUAL_SYNC_ID` remains as a convenience: it defines the "Default" budget used when no other
-budgets have been configured yet (and for backwards compatibility with older configs).
-
-Every budget needs its own sync id (Actual -> Settings -> Advanced, with that budget open). Two
-budgets with the same sync id are the same Actual file and list identical accounts, so setup and
-the dashboard refuse to add one, and the pairing page flags any existing clash in `config.json`.
 
 ### 5. Sync
 
@@ -359,7 +339,7 @@ src/
 │   └── tokens.ts       # Token storage, refresh, metadata, expiry check
 ├── clients/
 │   ├── truelayer.ts    # TrueLayer Data API (accounts, transactions, balance, /me, reauthuri)
-│   └── actual.ts       # Actual Budget API wrapper + withBudget() mutex + budget switching
+│   └── actual.ts       # Actual Budget API wrapper + withActual() mutex
 ├── mapper.ts           # TrueLayer transaction → Actual transaction
 ├── notify.ts           # ntfy / Home Assistant notifications with dedupe
 ├── config.ts           # config.json read/write with zod validation
