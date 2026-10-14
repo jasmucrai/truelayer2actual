@@ -11,16 +11,30 @@ import {
   loadConfigIfExists,
   reauthWarnDays,
   removeAccountsForConnection,
+  listBudgets,
+  addBudget,
+  generateBudgetId,
   type Config,
+  duplicateSyncIdGroups,
+  DuplicateSyncIdError,
 } from '../config.js';
-import { withActual, getActualAccounts, getActualError } from '../clients/actual.js';
+import { withBudget, getActualAccounts, getActualError } from '../clients/actual.js';
 import { runSync } from '../commands/sync.js';
-import { startNewAuth, startReauth, processCallback, savePairings } from './oauth.js';
+import {
+  startNewAuth,
+  startReauth,
+  processCallback,
+  savePairings,
+  getPairingSession,
+  type PairingSelection,
+} from './oauth.js';
 import {
   dashboardPage,
   pairingPage,
+  PAIRING_SCRIPT_CSP_SOURCE,
   messagePage,
   confirmDeletePage,
+  type BudgetAccounts,
   type ConnectionStatus,
   type ConnectionView,
 } from './pages.js';
@@ -77,6 +91,23 @@ async function buildConnectionViews(): Promise<ConnectionView[]> {
       reason: tokens.reauthReason,
     };
   });
+}
+
+/**
+ * Explain budgets that point at the same Actual file. They necessarily list the
+ * same accounts, which otherwise looks like the wrong budget being loaded.
+ */
+function duplicateSyncIdWarning(budgets: Awaited<ReturnType<typeof listBudgets>>): string | undefined {
+  const groups = duplicateSyncIdGroups(budgets);
+  if (groups.length === 0) return undefined;
+  const names = groups
+    .map((group) => group.map((b) => `"${b.name}"`).join(' and '))
+    .join('; ');
+  return (
+    `Budgets ${names} share the same sync ID, so they are the same Actual budget and show ` +
+    'identical accounts. Each Actual budget has its own sync ID (Actual → Settings → Advanced); ' +
+    'correct the sync ID in data/config.json.'
+  );
 }
 
 function bannerFromQuery(req: Request): { message?: string; error?: string } {
@@ -189,9 +220,12 @@ export function createApp(): Express {
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('Cache-Control', 'no-store');
     if (!req.path.startsWith('/healthz')) {
+      // The pairing page alone ships one inline script (budget -> account
+      // filter), allowed by hash; every other page stays script-free.
+      const scriptSrc = req.path.startsWith('/pair/') ? `script-src ${PAIRING_SCRIPT_CSP_SOURCE}; ` : '';
       res.setHeader(
         'Content-Security-Policy',
-        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
+        `default-src 'none'; ${scriptSrc}style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'`
       );
     }
     next();
@@ -339,20 +373,91 @@ export function createApp(): Express {
         return;
       }
 
-      const actualAccounts = await withActual(() => getActualAccounts());
+      res.redirect('/pair/' + encodeURIComponent(outcome.pairingId));
+    })
+  );
+
+  app.get(
+    '/pair/:pairingId',
+    asyncHandler(async (req, res) => {
+      const pairingId = req.params.pairingId;
+      const session = getPairingSession(pairingId);
+      if (!session) {
+        res
+          .status(404)
+          .send(messagePage('Session expired', 'Pairing session expired. Start again from the dashboard.', { error: true }));
+        return;
+      }
+
+      const budgets = await listBudgets();
+      const budgetAccounts: BudgetAccounts[] = [];
+      for (const budget of budgets) {
+        try {
+          const accounts = await withBudget(budget, () => getActualAccounts());
+          budgetAccounts.push({ budget, accounts });
+        } catch (err) {
+          logger.warn(
+            `Could not load accounts for budget "${budget.name}":`,
+            err instanceof Error ? err.message : String(err)
+          );
+        }
+      }
+
       res.send(
         pairingPage({
-          pairingId: outcome.pairingId,
-          provider: outcome.session.provider,
-          items: outcome.session.items,
-          actualAccounts,
+          pairingId,
+          provider: session.provider,
+          items: session.items,
+          budgetAccounts,
+          warning:
+            [session.warning, duplicateSyncIdWarning(budgets), asString(req.query.err)]
+              .filter((w): w is string => Boolean(w))
+              .join(' ') || undefined,
           message:
-            outcome.session.mode === 'reauth'
+            session.mode === 'reauth'
               ? 'Reconnected. Confirm any new accounts below.'
               : undefined,
-          warning: outcome.warning,
         })
       );
+    })
+  );
+
+  app.post(
+    '/budgets',
+    asyncHandler(async (req, res) => {
+      const name = asString(req.body?.name);
+      const syncId = asString(req.body?.syncId);
+      const pairingId = asString(req.body?.pairingId);
+      const encryptionPassword = asString(req.body?.encryptionPassword);
+
+      if (!name || !syncId) {
+        res
+          .status(400)
+          .send(messagePage('Invalid request', 'Budget name and sync ID are both required.', { error: true }));
+        return;
+      }
+
+      try {
+        await addBudget({ id: generateBudgetId(), name, syncId, encryptionPassword });
+      } catch (err) {
+        if (err instanceof DuplicateSyncIdError) {
+          if (pairingId) {
+            res.redirect(
+              '/pair/' + encodeURIComponent(pairingId) + '?err=' + encodeURIComponent(err.message)
+            );
+          } else {
+            res.status(400).send(messagePage('Budget not added', err.message, { error: true }));
+          }
+          return;
+        }
+        throw err;
+      }
+
+      if (pairingId) {
+        res.redirect('/pair/' + encodeURIComponent(pairingId));
+      } else {
+        res.redirect('/?msg=' + encodeURIComponent(`Added budget "${name}".`));
+      }
     })
   );
 
@@ -364,13 +469,25 @@ export function createApp(): Express {
         res.status(400).send(messagePage('Invalid request', 'Missing pairing session.', { error: true }));
         return;
       }
-      const mapping: Record<string, string> = {};
-      for (const [key, value] of Object.entries(req.body as Record<string, unknown>)) {
-        if (key.startsWith('map_') && typeof value === 'string' && value) {
-          mapping[key.slice('map_'.length)] = value;
+
+      const session = getPairingSession(pairingId);
+      if (!session) {
+        res
+          .status(400)
+          .send(messagePage('Session expired', 'Pairing session expired. Start again from the dashboard.', { error: true }));
+        return;
+      }
+
+      const selections: Record<string, PairingSelection> = {};
+      for (const item of session.items) {
+        const budgetId = asString(req.body?.[`budget_${item.truelayerAccountId}`]);
+        const actualAccountId = asString(req.body?.[`map_${item.truelayerAccountId}`]);
+        if (budgetId && actualAccountId) {
+          selections[item.truelayerAccountId] = { budgetId, actualAccountId };
         }
       }
-      const { saved } = await savePairings(pairingId, mapping);
+
+      const { saved } = await savePairings(pairingId, selections);
       res.redirect('/?msg=' + encodeURIComponent(`Saved ${saved} pairing(s).`));
     })
   );

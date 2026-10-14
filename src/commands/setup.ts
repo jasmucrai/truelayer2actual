@@ -19,12 +19,23 @@ import {
   type TrueLayerCard,
 } from '../clients/truelayer.js';
 import {
-  initActual,
+  switchBudget,
   shutdownActual,
   getActualAccounts,
   type ActualAccount,
 } from '../clients/actual.js';
-import { loadConfigIfExists, saveConfig, mergeAccounts, type Config, type Account } from '../config.js';
+import {
+  loadConfigIfExists,
+  saveConfig,
+  mergeAccounts,
+  budgetFromEnv,
+  generateBudgetId,
+  findBudgetBySyncId,
+  DuplicateSyncIdError,
+  type Config,
+  type Account,
+  type Budget,
+} from '../config.js';
 import { logger } from '../logger.js';
 import { describeError } from '../util/errors.js';
 
@@ -98,19 +109,89 @@ async function authenticateBank(
 // Interactive account picker (shared for accounts and cards)
 // ---------------------------------------------------------------------------
 
-async function fetchActualAccounts(): Promise<ActualAccount[]> {
-  await initActual();
-  const accounts = await getActualAccounts();
-  await shutdownActual();
-  return accounts;
+async function fetchActualAccounts(budget: Budget): Promise<ActualAccount[]> {
+  await switchBudget(budget);
+  return getActualAccounts();
+}
+
+// ---------------------------------------------------------------------------
+// Budget collection / selection
+// ---------------------------------------------------------------------------
+
+async function collectBudgets(rl: readline.Interface): Promise<Budget[]> {
+  const budgets: Budget[] = [];
+  const envBudget = budgetFromEnv();
+  if (envBudget) budgets.push(envBudget);
+
+  console.log('\n===========================================================');
+  console.log('Actual Budgets');
+  console.log('===========================================================');
+  if (budgets.length > 0) {
+    console.log('Found default budget from ACTUAL_SYNC_ID.');
+  }
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    console.log('\nCurrent budgets:');
+    budgets.forEach((b, i) => {
+      console.log(`  ${i + 1}. ${b.name} (${b.syncId})`);
+    });
+
+    const add = await prompt(rl, 'Add another budget? [y/N]: ');
+    if (add.toLowerCase() !== 'y') break;
+
+    const name = await prompt(rl, 'Budget name: ');
+    const syncId = await prompt(rl, 'Sync ID (Actual → Settings → Advanced): ');
+    if (!name || !syncId) {
+      logger.warn('Budget name and sync ID are both required.');
+      continue;
+    }
+    const clash = findBudgetBySyncId(budgets, syncId);
+    if (clash) {
+      logger.warn(new DuplicateSyncIdError(syncId, clash).message);
+      continue;
+    }
+    const encryptionPassword = await prompt(
+      rl,
+      'Encryption password (blank if E2E encryption is off): '
+    );
+    budgets.push({
+      id: generateBudgetId(),
+      name,
+      syncId,
+      encryptionPassword: encryptionPassword || undefined,
+    });
+  }
+
+  return budgets;
+}
+
+async function pickBudget(
+  rl: readline.Interface,
+  budgets: Budget[],
+  label: string
+): Promise<Budget> {
+  console.log(`\n${label}`);
+  budgets.forEach((b, i) => {
+    console.log(`  ${i + 1}. ${b.name} (${b.syncId})`);
+  });
+
+  while (true) {
+    const answer = await prompt(rl, `Select budget [1-${budgets.length}]: `);
+    const num = parseInt(answer, 10);
+    if (!isNaN(num) && num >= 1 && num <= budgets.length) {
+      return budgets[num - 1];
+    }
+    console.log(`Invalid. Enter 1–${budgets.length}.`);
+  }
 }
 
 async function pickActualAccount(
   rl: readline.Interface,
-  actualAccounts: ActualAccount[],
-  label: string
-): Promise<{ account: ActualAccount | null; actualAccounts: ActualAccount[] }> {
-  let accounts = actualAccounts;
+  label: string,
+  refresh: () => Promise<ActualAccount[]>
+): Promise<ActualAccount | null> {
+  let accounts = await refresh();
 
   function printAccounts(): void {
     console.log(`\n${label}`);
@@ -120,23 +201,32 @@ async function pickActualAccount(
     });
   }
 
+  if (accounts.length === 0) {
+    logger.warn(`No open accounts found for "${label}" — skipping.`);
+    return null;
+  }
+
   printAccounts();
 
   while (true) {
     const answer = await prompt(rl, `Select [1-${accounts.length} / s to skip / r to refresh]: `);
     if (answer.toLowerCase() === 's') {
       logger.info(`Skipped: ${label}`);
-      return { account: null, actualAccounts: accounts };
+      return null;
     }
     if (answer.toLowerCase() === 'r') {
       logger.info('Refreshing Actual accounts...');
-      accounts = await fetchActualAccounts();
+      accounts = await refresh();
+      if (accounts.length === 0) {
+        logger.warn(`No open accounts found for "${label}" — skipping.`);
+        return null;
+      }
       printAccounts();
       continue;
     }
     const num = parseInt(answer, 10);
     if (!isNaN(num) && num >= 1 && num <= accounts.length) {
-      return { account: accounts[num - 1], actualAccounts: accounts };
+      return accounts[num - 1];
     }
     console.log(`Invalid. Enter 1–${accounts.length}, "s" to skip, or "r" to refresh.`);
   }
@@ -154,12 +244,21 @@ async function main(): Promise<void> {
   const redirectUri = requireEnv('TRUELAYER_REDIRECT_URI');
   requireEnv('ACTUAL_SERVER_URL');
   requireEnv('ACTUAL_PASSWORD');
-  requireEnv('ACTUAL_SYNC_ID');
 
   const port = parseInt(process.env.SETUP_PORT ?? '3000', 10);
   const sandbox = isSandbox(clientId);
 
   logger.info(`Using TrueLayer ${sandbox ? 'SANDBOX' : 'LIVE'} environment`);
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  // Collect the Actual budgets to sync into.
+  const budgets = await collectBudgets(rl);
+  if (budgets.length === 0) {
+    logger.error('No budgets defined. Set ACTUAL_SYNC_ID or add a budget during setup.');
+    rl.close();
+    process.exit(1);
+  }
 
   // Collect connections from one or more banks
   const allConnections: Array<{
@@ -167,8 +266,6 @@ async function main(): Promise<void> {
     tlAccounts: TrueLayerAccount[];
     tlCards: TrueLayerCard[];
   }> = [];
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
   let bankNumber = 1;
   // eslint-disable-next-line no-constant-condition
@@ -197,23 +294,9 @@ async function main(): Promise<void> {
   if (allConnections.length === 0) {
     logger.warn('No bank connections established. Exiting.');
     rl.close();
+    await shutdownActual();
     process.exit(0);
   }
-
-  // Connect to Actual and get accounts for pairing
-  logger.info('Connecting to Actual Budget...');
-  const actualAccounts = await fetchActualAccounts();
-
-  if (actualAccounts.length === 0) {
-    logger.error(
-      'No open accounts found in Actual Budget. ' +
-        'Please create accounts in Actual first, then re-run setup.'
-    );
-    rl.close();
-    process.exit(1);
-  }
-
-  logger.info(`Found ${actualAccounts.length} Actual account(s)`);
 
   // Interactive pairing across all connections
   const pairedAccounts: Account[] = [];
@@ -221,55 +304,75 @@ async function main(): Promise<void> {
   console.log('\n===========================================================');
   console.log('Account Pairing');
   console.log('===========================================================');
-  console.log('For each bank account, choose the matching Actual account.');
+  console.log('For each bank account, choose the Actual budget, then the matching Actual account.');
   console.log('Enter the number, "s" to skip, or "r" to refresh the Actual account list.\n');
 
-  let currentActualAccounts = actualAccounts;
+  const accountsCache = new Map<string, ActualAccount[]>();
+
+  async function accountsForBudget(budget: Budget): Promise<ActualAccount[]> {
+    const cached = accountsCache.get(budget.id);
+    if (cached) return cached;
+    const accounts = await fetchActualAccounts(budget);
+    accountsCache.set(budget.id, accounts);
+    return accounts;
+  }
 
   for (const { connectionId, tlAccounts, tlCards } of allConnections) {
     // Pair bank accounts
     for (const tlAccount of tlAccounts) {
-      const { account: picked, actualAccounts: refreshed } = await pickActualAccount(
+      const budget = await pickBudget(
         rl,
-        currentActualAccounts,
-        `${tlAccount.provider.display_name} — ${tlAccount.display_name} (${tlAccount.account_type}) [${tlAccount.currency}]`
+        budgets,
+        `Which Actual budget should "${tlAccount.display_name}" sync into?`
       );
-      currentActualAccounts = refreshed;
+      const picked = await pickActualAccount(
+        rl,
+        `${tlAccount.provider.display_name} — ${tlAccount.display_name} (${tlAccount.account_type}) [${tlAccount.currency}]`,
+        () => accountsForBudget(budget)
+      );
       if (picked) {
         pairedAccounts.push({
           name: tlAccount.display_name,
           connectionId,
+          budgetId: budget.id,
           accountKind: 'account' as const,
           truelayerAccountId: tlAccount.account_id,
           actualAccountId: picked.id,
           currency: tlAccount.currency,
         });
-        logger.info(`Paired: "${tlAccount.display_name}" → "${picked.name}"`);
+        logger.info(`Paired: "${tlAccount.display_name}" → "${picked.name}" (${budget.name})`);
       }
     }
 
     // Pair cards
     for (const tlCard of tlCards) {
+      const budget = await pickBudget(
+        rl,
+        budgets,
+        `Which Actual budget should "${tlCard.display_name}" sync into?`
+      );
       const label = `${tlCard.provider.display_name} — ${tlCard.display_name}` +
         (tlCard.partial_card_number ? ` (****${tlCard.partial_card_number})` : '') +
         ` [${tlCard.card_type}] [${tlCard.currency}]`;
-      const { account: picked, actualAccounts: refreshed } = await pickActualAccount(rl, currentActualAccounts, label);
-      currentActualAccounts = refreshed;
+      const picked = await pickActualAccount(rl, label, () => accountsForBudget(budget));
       if (picked) {
         pairedAccounts.push({
           name: tlCard.display_name,
           connectionId,
+          budgetId: budget.id,
           accountKind: 'card' as const,
           truelayerAccountId: tlCard.account_id,
           actualAccountId: picked.id,
           currency: tlCard.currency,
         });
-        logger.info(`Paired card: "${tlCard.display_name}" → "${picked.name}"`);
+        logger.info(`Paired card: "${tlCard.display_name}" → "${picked.name}" (${budget.name})`);
       }
     }
   }
 
   rl.close();
+
+  await shutdownActual();
 
   if (pairedAccounts.length === 0) {
     logger.warn('No accounts were paired. Exiting without saving config.');
@@ -295,12 +398,23 @@ async function main(): Promise<void> {
   const existingAccounts = existingConfig?.accounts ?? [];
   const mergedAccounts = mergeAccounts(existingAccounts, pairedAccounts);
 
+  // Merge budgets: keep any previously configured, override/append the ones
+  // collected now so env changes and new budgets both take effect.
+  const existingBudgets = existingConfig?.budgets ?? [];
+  const mergedBudgets = [...existingBudgets];
+  for (const budget of budgets) {
+    const idx = mergedBudgets.findIndex((b) => b.id === budget.id);
+    if (idx === -1) mergedBudgets.push(budget);
+    else mergedBudgets[idx] = budget;
+  }
+
   const config: Config = {
+    budgets: mergedBudgets,
     accounts: mergedAccounts,
     createdAt: existingConfig?.createdAt ?? new Date().toISOString(),
   };
   await saveConfig(config);
-  logger.info(`Config saved (${mergedAccounts.length} account(s))`);
+  logger.info(`Config saved (${mergedAccounts.length} account(s) across ${mergedBudgets.length} budget(s))`);
 
   // Remove token connections that are no longer referenced
   const activeConnectionIds = new Set(mergedAccounts.map((a) => a.connectionId));
