@@ -2,7 +2,7 @@
  * Async mutexes used to serialise access to shared state.
  *
  * Ordering rule: a full sync takes `syncLock` first, then briefly takes
- * `stateLock` for read-modify-write sections, and `withActual` is never taken
+ * `stateLock` for read-modify-write sections, and `withBudget` is never taken
  * while holding `stateLock`. This keeps critical sections short and avoids
  * deadlock.
  */

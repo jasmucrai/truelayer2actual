@@ -1,13 +1,25 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { logger } from './logger.js';
 import { atomicWriteFile } from './util/fs.js';
 import { withStateLock } from './util/lock.js';
 
+/** Identifier used for the single legacy budget defined by env vars. */
+export const DEFAULT_BUDGET_ID = 'default';
+
+const BudgetSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  syncId: z.string(),
+  encryptionPassword: z.string().optional(),
+});
+
 const AccountSchema = z.object({
   name: z.string(),
   connectionId: z.string(),
+  budgetId: z.string().default(DEFAULT_BUDGET_ID),
   accountKind: z.enum(['account', 'card']).default('account'),
   truelayerAccountId: z.string(),
   actualAccountId: z.string(),
@@ -16,10 +28,12 @@ const AccountSchema = z.object({
 });
 
 const ConfigSchema = z.object({
+  budgets: z.array(BudgetSchema).default([]),
   accounts: z.array(AccountSchema),
   createdAt: z.string(),
 });
 
+export type Budget = z.infer<typeof BudgetSchema>;
 export type Account = z.infer<typeof AccountSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -79,6 +93,47 @@ export function syncIntervalHours(raw = process.env.SYNC_INTERVAL_HOURS): number
   return n;
 }
 
+/**
+ * Build the single "default" budget from the legacy environment variables.
+ * Returns `null` when no legacy sync id is configured.
+ */
+export function budgetFromEnv(): Budget | null {
+  const syncId = process.env.ACTUAL_SYNC_ID;
+  if (!syncId) return null;
+  return {
+    id: DEFAULT_BUDGET_ID,
+    name: 'Default',
+    syncId,
+    encryptionPassword: process.env.ACTUAL_ENCRYPTION_PASSWORD || undefined,
+  };
+}
+
+export function generateBudgetId(): string {
+  return `budget_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+}
+
+/**
+ * Normalise a parsed config so legacy files keep working: seed a "default"
+ * budget from env vars when none are defined, and make sure any account that
+ * still references the default budget id has a matching budget to point at.
+ */
+function normalizeBudgets(data: Config): Config {
+  let budgets = data.budgets;
+
+  if (budgets.length === 0) {
+    const envBudget = budgetFromEnv();
+    if (envBudget) budgets = [envBudget];
+  }
+
+  const referencesDefault = data.accounts.some((a) => a.budgetId === DEFAULT_BUDGET_ID);
+  if (referencesDefault && !budgets.some((b) => b.id === DEFAULT_BUDGET_ID)) {
+    const envBudget = budgetFromEnv();
+    if (envBudget) budgets = [envBudget, ...budgets];
+  }
+
+  return budgets === data.budgets ? data : { ...data, budgets };
+}
+
 export async function loadConfig(): Promise<Config> {
   if (!fs.existsSync(configPathResolve())) {
     throw new Error(
@@ -106,8 +161,11 @@ export async function loadConfig(): Promise<Config> {
     );
   }
 
-  logger.debug(`Loaded config with ${result.data.accounts.length} account(s)`);
-  return result.data;
+  const config = normalizeBudgets(result.data);
+  logger.debug(
+    `Loaded config with ${config.accounts.length} account(s) across ${config.budgets.length} budget(s)`
+  );
+  return config;
 }
 
 export async function saveConfig(config: Config): Promise<void> {
@@ -188,6 +246,41 @@ export async function removeAccountsForConnection(connectionId: string): Promise
       logger.debug(`Removed accounts for connection ${connectionId} from config.json`);
     }
     return remaining;
+  });
+}
+
+/**
+ * Return the configured budgets, falling back to the env-defined default
+ * budget when no config exists yet. Used by the web dashboard pairing flow.
+ */
+export async function listBudgets(): Promise<Budget[]> {
+  try {
+    const config = await loadConfig();
+    if (config.budgets.length > 0) return config.budgets;
+  } catch {
+    // No config yet — fall through to the env fallback.
+  }
+  const envBudget = budgetFromEnv();
+  return envBudget ? [envBudget] : [];
+}
+
+/** Add or update a budget, creating the config file on first use. */
+export async function addBudget(budget: Budget): Promise<Budget[]> {
+  return withStateLock(async () => {
+    // Only a missing file starts fresh; a corrupt config must throw rather
+    // than be overwritten (which would wipe the account mappings).
+    const config: Config = (await loadConfigIfExists()) ?? {
+      budgets: [],
+      accounts: [],
+      createdAt: new Date().toISOString(),
+    };
+
+    const idx = config.budgets.findIndex((b) => b.id === budget.id);
+    if (idx === -1) config.budgets.push(budget);
+    else config.budgets[idx] = budget;
+
+    await saveConfig(config);
+    return config.budgets;
   });
 }
 

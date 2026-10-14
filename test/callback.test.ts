@@ -222,7 +222,7 @@ describe('savePairings', () => {
     if (outcome.type !== 'pair') return;
 
     await assert.rejects(
-      () => savePairings(outcome.pairingId, { tl_new: 'actual_1' }),
+      () => savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } }),
       /Config file could not be loaded/
     );
 
@@ -241,15 +241,19 @@ describe('savePairings', () => {
     assert.equal(outcome.type, 'pair');
     if (outcome.type !== 'pair') return;
 
-    await assert.rejects(() => savePairings(outcome.pairingId, { tl_new: 'actual_1' }));
+    await assert.rejects(() => savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } }));
 
     // Fix the config and retry — the session must still be alive.
     fs.writeFileSync(
       configPath,
-      JSON.stringify({ accounts: [], createdAt: new Date().toISOString() })
+      JSON.stringify({
+        budgets: [{ id: 'default', name: 'Default', syncId: 'sync-1' }],
+        accounts: [],
+        createdAt: new Date().toISOString(),
+      })
     );
 
-    const result = await savePairings(outcome.pairingId, { tl_new: 'actual_1' });
+    const result = await savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } });
     assert.equal(result.saved, 1);
   });
 });

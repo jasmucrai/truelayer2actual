@@ -10,6 +10,7 @@ function account(overrides: Partial<Account> = {}): Account {
   return {
     name: 'Acct',
     connectionId: 'old',
+    budgetId: 'default',
     accountKind: 'account',
     truelayerAccountId: 'tl-1',
     actualAccountId: 'actual-1',
@@ -28,6 +29,15 @@ describe('mergeAccounts', () => {
     assert.equal(merged.length, 1);
     assert.equal(merged[0].actualAccountId, 'actual-2');
     assert.equal(merged[0].lastSyncedAt, '2026-01-01T00:00:00.000Z');
+  });
+
+  it('carries the incoming budgetId into a merged account', () => {
+    const existing = [account({ budgetId: 'default' })];
+    const incoming = [account({ budgetId: 'budget_123' })];
+
+    const merged = mergeAccounts(existing, incoming);
+
+    assert.equal(merged[0].budgetId, 'budget_123');
   });
 
   it('appends accounts that are not already mapped', () => {

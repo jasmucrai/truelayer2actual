@@ -77,11 +77,17 @@ describe('pairingPage', () => {
           currency: 'GBP',
         },
       ],
-      actualAccounts: [{ id: 'a"1', name: 'Savings <x>', offbudget: false, closed: false }],
+      budgetAccounts: [
+        {
+          budget: { id: 'b"1', name: 'Home <b>', syncId: 'sync' },
+          accounts: [{ id: 'a"1', name: 'Savings <x>', offbudget: false, closed: false }],
+        },
+      ],
       message: '<b>banner</b>',
       warning: '<script>alert(2)</script>',
     });
-    assert.equal(html.includes('<script>'), false);
+    assert.equal(html.includes('<script>alert'), false);
+    assert.equal(html.includes('Home <b>'), false);
     assert.equal(html.includes('<b>banner</b>'), false);
     assert.ok(html.includes('&lt;script&gt;'));
     assert.ok(html.includes('Current &lt;account&gt;'));

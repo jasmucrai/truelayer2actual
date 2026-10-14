@@ -20,7 +20,7 @@ import {
   type TrueLayerMe,
 } from '../clients/truelayer.js';
 import {
-  withActual,
+  withBudget,
   shutdownActual,
   importToActual,
   getActualAccountBalance,
@@ -32,7 +32,7 @@ import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
 import { describeError } from '../util/errors.js';
 import { logger } from '../logger.js';
-import type { Account } from '../config.js';
+import type { Account, Budget } from '../config.js';
 
 /** Prevents two full syncs from overlapping (token rotation, double import). */
 const withSyncLock = createMutex();
@@ -280,6 +280,56 @@ export async function runSync(): Promise<SyncSummary> {
   return run;
 }
 
+async function syncAccount(
+  account: Account,
+  accessToken: string,
+  lastSyncedAt: Map<string, string>,
+  summary: SyncSummary
+): Promise<void> {
+  try {
+    const lookback = Number(process.env.SYNC_DAYS_LOOKBACK ?? '7');
+    const to = today();
+    const lastSyncDate = account.lastSyncedAt
+      ? account.lastSyncedAt.split('T')[0]
+      : daysAgo(lookback);
+    // Always look back at least `lookback` days so transactions that were pending
+    // at last sync but have since settled are not missed.
+    const floor = daysAgo(lookback);
+    const from = lastSyncDate < floor ? lastSyncDate : floor;
+
+    logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
+
+    const txns = account.accountKind === 'card'
+      ? await fetchCardTransactions(accessToken, account.truelayerAccountId, from, to)
+      : await fetchTransactions(accessToken, account.truelayerAccountId, from, to);
+    logger.info(`[${account.name}] Fetched ${txns.length} transaction(s)`);
+
+    await migrateImportedIds(account, txns, from, to);
+
+    const isCard = account.accountKind === 'card';
+    const mapped = txns.map((t) => mapTransaction(t, isCard));
+    const result = await importToActual(account.actualAccountId, mapped);
+
+    logger.info(`[${account.name}] +${result.added.length} added, ${result.updated.length} updated`);
+
+    if (result.errors && result.errors.length > 0) {
+      throw new Error(`Import errors: ${JSON.stringify(result.errors)}`);
+    }
+
+    await validateBalance(accessToken, account);
+    lastSyncedAt.set(account.truelayerAccountId, new Date().toISOString());
+    summary.synced.push(account.name);
+  } catch (err) {
+    const reason = describeError(err);
+    logger.error(`[${account.name}] Sync failed:`, reason);
+    summary.errors.push({
+      connectionId: account.connectionId,
+      account: account.name,
+      reason,
+    });
+  }
+}
+
 async function runSyncInternal(): Promise<SyncSummary> {
   logger.info('Starting truelayer2actual sync...');
 
@@ -301,47 +351,44 @@ async function runSyncInternal(): Promise<SyncSummary> {
   // changed connection ids isn't clobbered by a stale in-memory snapshot.
   const lastSyncedAt = new Map<string, string>();
 
-  await withActual(async () => {
-    for (const account of config.accounts) {
-      const accessToken = accessTokens.get(account.connectionId);
-      if (!accessToken) continue;
+  // Group accounts by Actual budget and sync each budget in turn, switching the
+  // Active Budget client to the right budget before touching its accounts.
+  const budgetById = new Map<string, Budget>(config.budgets.map((b) => [b.id, b]));
+  const accountsByBudget = new Map<string, Account[]>();
+  for (const account of config.accounts) {
+    const list = accountsByBudget.get(account.budgetId) ?? [];
+    list.push(account);
+    accountsByBudget.set(account.budgetId, list);
+  }
 
-      try {
-        const lookback = Number(process.env.SYNC_DAYS_LOOKBACK ?? '7');
-        const to = today();
-        const lastSyncDate = account.lastSyncedAt
-          ? account.lastSyncedAt.split('T')[0]
-          : daysAgo(lookback);
-        // Always look back at least `lookback` days so transactions that were pending
-        // at last sync but have since settled are not missed.
-        const floor = daysAgo(lookback);
-        const from = lastSyncDate < floor ? lastSyncDate : floor;
+  for (const [budgetId, accounts] of accountsByBudget) {
+    const budget = budgetById.get(budgetId);
+    if (!budget) {
+      for (const account of accounts) {
+        summary.errors.push({
+          connectionId: account.connectionId,
+          account: account.name,
+          reason: `Unknown budget "${budgetId}" — run "npm run setup" to reconfigure.`,
+        });
+      }
+      continue;
+    }
 
-        logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
+    // Skip the (slow) budget download when none of its banks are usable.
+    const ready = accounts.filter((a) => accessTokens.has(a.connectionId));
+    if (ready.length === 0) continue;
 
-        const txns = account.accountKind === 'card'
-          ? await fetchCardTransactions(accessToken, account.truelayerAccountId, from, to)
-          : await fetchTransactions(accessToken, account.truelayerAccountId, from, to);
-        logger.info(`[${account.name}] Fetched ${txns.length} transaction(s)`);
-
-        await migrateImportedIds(account, txns, from, to);
-
-        const isCard = account.accountKind === 'card';
-        const mapped = txns.map((t) => mapTransaction(t, isCard));
-        const result = await importToActual(account.actualAccountId, mapped);
-
-        logger.info(`[${account.name}] +${result.added.length} added, ${result.updated.length} updated`);
-
-        if (result.errors && result.errors.length > 0) {
-          throw new Error(`Import errors: ${JSON.stringify(result.errors)}`);
+    try {
+      await withBudget(budget, async () => {
+        for (const account of ready) {
+          await syncAccount(account, accessTokens.get(account.connectionId)!, lastSyncedAt, summary);
         }
-
-        await validateBalance(accessToken, account);
-        lastSyncedAt.set(account.truelayerAccountId, new Date().toISOString());
-        summary.synced.push(account.name);
-      } catch (err) {
-        const reason = describeError(err);
-        logger.error(`[${account.name}] Sync failed:`, reason);
+      });
+    } catch (err) {
+      // A budget that can't be downloaded shouldn't abort the other budgets.
+      const reason = describeError(err);
+      logger.error(`[budget ${budget.name}] Failed to switch budget:`, reason);
+      for (const account of accounts) {
         summary.errors.push({
           connectionId: account.connectionId,
           account: account.name,
@@ -349,7 +396,7 @@ async function runSyncInternal(): Promise<SyncSummary> {
         });
       }
     }
-  });
+  }
 
   if (lastSyncedAt.size > 0) {
     await updateConfig((cfg) => {
