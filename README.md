@@ -194,6 +194,10 @@ optionally, an E2E encryption password) differs per budget.
 `ACTUAL_SYNC_ID` remains as a convenience: it defines the "Default" budget used when no other
 budgets have been configured yet (and for backwards compatibility with older configs).
 
+Every budget needs its own sync id (Actual -> Settings -> Advanced, with that budget open). Two
+budgets with the same sync id are the same Actual file and list identical accounts, so setup and
+the dashboard refuse to add one, and the pairing page flags any existing clash in `config.json`.
+
 ### 5. Sync
 
 The built-in scheduler syncs every `SYNC_INTERVAL_HOURS` (default 6). To sync manually,

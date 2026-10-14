@@ -30,6 +30,8 @@ import {
   mergeAccounts,
   budgetFromEnv,
   generateBudgetId,
+  findBudgetBySyncId,
+  DuplicateSyncIdError,
   type Config,
   type Account,
   type Budget,
@@ -142,6 +144,11 @@ async function collectBudgets(rl: readline.Interface): Promise<Budget[]> {
     const syncId = await prompt(rl, 'Sync ID (Actual → Settings → Advanced): ');
     if (!name || !syncId) {
       logger.warn('Budget name and sync ID are both required.');
+      continue;
+    }
+    const clash = findBudgetBySyncId(budgets, syncId);
+    if (clash) {
+      logger.warn(new DuplicateSyncIdError(syncId, clash).message);
       continue;
     }
     const encryptionPassword = await prompt(

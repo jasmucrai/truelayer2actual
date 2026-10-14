@@ -192,6 +192,7 @@ export interface PairingPageOptions {
   items: PairingItem[];
   budgetAccounts: BudgetAccounts[];
   message?: string;
+  /** Shown as an error banner, e.g. two budgets sharing one sync id. */
   warning?: string;
 }
 
@@ -244,6 +245,7 @@ export function pairingPage(options: PairingPageOptions): string {
     `     <h1>Pair ${escapeHtml(options.provider)} accounts</h1>
      ${options.warning ? `<div class="error">${escapeHtml(options.warning)}</div>` : ''}
      ${options.message ? `<div class="banner">${escapeHtml(options.message)}</div>` : ''}
+     ${options.warning ? `<div class="error">${escapeHtml(options.warning)}</div>` : ''}
      <p>For each bank account, pick the Actual budget, then the matching account. Leave anything you do not want to import set to "skip".</p>
      ${noBudgets}
      <form method="post" action="/pair">

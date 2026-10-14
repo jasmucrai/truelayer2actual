@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import {
   mergeAccounts,
   reconcileConfigAccounts,
+  findBudgetBySyncId,
+  duplicateSyncIdGroups,
+  DuplicateSyncIdError,
   type Account,
+  type Budget,
 } from '../src/config.js';
 
 function account(overrides: Partial<Account> = {}): Account {
@@ -99,5 +103,56 @@ describe('reconcileConfigAccounts', () => {
     assert.equal(result.changed, false);
     assert.equal(result.accounts[0].connectionId, 'other');
     assert.deepEqual(result.missing, []);
+  });
+});
+
+describe('findBudgetBySyncId', () => {
+  const budgets: Budget[] = [
+    { id: 'default', name: 'Default', syncId: 'sync-a' },
+    { id: 'budget_1', name: 'Joint', syncId: 'sync-b' },
+  ];
+
+  it('finds another budget already using the sync id', () => {
+    assert.equal(findBudgetBySyncId(budgets, 'sync-a')?.name, 'Default');
+  });
+
+  it('ignores the budget being updated', () => {
+    assert.equal(findBudgetBySyncId(budgets, 'sync-a', 'default'), undefined);
+  });
+
+  it('returns undefined for an unused sync id', () => {
+    assert.equal(findBudgetBySyncId(budgets, 'sync-c'), undefined);
+  });
+});
+
+describe('duplicateSyncIdGroups', () => {
+  it('groups budgets that point at the same Actual file', () => {
+    const budgets: Budget[] = [
+      { id: 'default', name: 'Default', syncId: 'sync-a' },
+      { id: 'budget_1', name: 'Joint', syncId: 'sync-a' },
+      { id: 'budget_2', name: 'Savings', syncId: 'sync-b' },
+    ];
+
+    const groups = duplicateSyncIdGroups(budgets);
+
+    assert.equal(groups.length, 1);
+    assert.deepEqual(groups[0].map((b) => b.name), ['Default', 'Joint']);
+  });
+
+  it('returns nothing when every sync id is distinct', () => {
+    const budgets: Budget[] = [
+      { id: 'default', name: 'Default', syncId: 'sync-a' },
+      { id: 'budget_1', name: 'Joint', syncId: 'sync-b' },
+    ];
+
+    assert.deepEqual(duplicateSyncIdGroups(budgets), []);
+  });
+});
+
+describe('DuplicateSyncIdError', () => {
+  it('names the budget that already uses the sync id', () => {
+    const err = new DuplicateSyncIdError('sync-a', { id: 'default', name: 'Default', syncId: 'sync-a' });
+    assert.equal(err.name, 'DuplicateSyncIdError');
+    assert.match(err.message, /already used by budget "Default"/);
   });
 });

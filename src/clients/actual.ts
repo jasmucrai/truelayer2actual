@@ -23,6 +23,11 @@ export interface ActualBudgetRef {
   encryptionPassword?: string;
 }
 
+/** Internal loot-core handler bridge exposed by @actual-app/api as `internal`. */
+interface ActualInternal {
+  send: (name: string, args?: unknown) => Promise<unknown>;
+}
+
 let serverReady = false;
 let activeSyncId: string | null = null;
 let actualQueue: Promise<unknown> = Promise.resolve();
@@ -98,6 +103,31 @@ async function downloadBudget(syncId: string, encryptionPassword?: string): Prom
   }
 }
 
+/**
+ * The library's `internal` handler bridge. It is a getter on the CommonJS
+ * `module.exports`, and Node snapshots getters as plain values when building
+ * the ESM namespace, so `api.internal` stays `null` forever. Go through the
+ * `default` export (the live `module.exports` object) instead.
+ */
+function actualInternal(): ActualInternal | null {
+  const mod = api as unknown as {
+    default?: { internal?: ActualInternal | null };
+    internal?: ActualInternal | null;
+  };
+  return mod.default?.internal ?? mod.internal ?? null;
+}
+
+/**
+ * Sync id (loot-core's `groupId`) of the budget the API currently has open, or
+ * `null` when none is. Read from the in-memory prefs, so this is cheap.
+ */
+async function loadedSyncId(): Promise<string | null> {
+  const internal = actualInternal();
+  if (!internal) return null;
+  const prefs = (await internal.send('load-prefs')) as { groupId?: string | null } | null | undefined;
+  return prefs?.groupId ?? null;
+}
+
 async function ensureServer(): Promise<void> {
   if (serverReady) return;
 
@@ -113,13 +143,41 @@ async function ensureServer(): Promise<void> {
 export async function switchBudget(budget: ActualBudgetRef): Promise<void> {
   try {
     await ensureServer();
+
+    // Never trust our own pointer alone: the library's "current budget" is
+    // process-global and can be closed or replaced behind our back.
+    if (activeSyncId === budget.syncId && (await loadedSyncId()) !== budget.syncId) {
+      logger.warn(`Actual Budget no longer has budget ${budget.syncId} open; reloading it`);
+      activeSyncId = null;
+    }
+
     if (activeSyncId !== budget.syncId) {
       activeSyncId = null; // a failed download leaves no known-good budget
       await downloadBudget(budget.syncId, budget.encryptionPassword);
+
+      // `downloadBudget` can resolve without the requested budget being open
+      // (e.g. it ignores a failed local `load-budget` and the follow-up sync is
+      // a no-op when nothing is loaded). Reading accounts at that point would
+      // silently return whatever budget is actually open, so check the sync id
+      // of the loaded budget before declaring the switch done.
+      const loaded = await loadedSyncId();
+      if (loaded !== budget.syncId) {
+        throw new Error(
+          `Actual Budget reported budget ${budget.syncId} as downloaded but has ` +
+            `${loaded ? `budget ${loaded}` : 'no budget'} open. ` +
+            'Check the sync id (Actual → Settings → Advanced) and the local cache in data/actual-cache.'
+        );
+      }
       activeSyncId = budget.syncId;
     }
     lastActualError = null;
   } catch (err) {
+    // `downloadBudget` mutates the process-global "current budget" before it
+    // can reject: it closes whatever is loaded, and when the target is already
+    // in the local cache it loads that budget before the remote sync that may
+    // fail. `activeSyncId` no longer describes what Actual actually has loaded,
+    // so forget it and force the next switch to re-establish the budget.
+    activeSyncId = null;
     lastActualError = err instanceof Error ? err.message : String(err);
     throw err;
   }
