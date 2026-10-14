@@ -87,7 +87,8 @@ export interface PairingSession {
 
 const pairingSessions = new Map<string, PairingSession>();
 
-function setPairing(session: Omit<PairingSession, 'createdAt'>): string {
+/** Exported so tests can build a pairing session without running the OAuth flow. */
+export function setPairing(session: Omit<PairingSession, 'createdAt'>): string {
   const id = crypto.randomBytes(12).toString('hex');
   pairingSessions.set(id, { ...session, createdAt: Date.now() });
   return id;
