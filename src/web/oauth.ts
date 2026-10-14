@@ -72,6 +72,8 @@ export interface PairingItem {
   name: string;
   accountKind: 'account' | 'card';
   currency: string;
+  /** Budget this account is already paired with, preselected on the pairing page. */
+  budgetId?: string;
 }
 
 export interface PairingSession {

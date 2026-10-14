@@ -197,11 +197,18 @@ export interface PairingPageOptions {
 }
 
 export function pairingPage(options: PairingPageOptions): string {
-  const budgetOptions = options.budgetAccounts
-    .map(
-      (b) => `<option value="${escapeHtml(b.budget.id)}">${escapeHtml(b.budget.name)}</option>`
-    )
-    .join('');
+  const budgetOptionsFor = (selectedId?: string): string => {
+    const selected = options.budgetAccounts.some((b) => b.budget.id === selectedId)
+      ? selectedId
+      : options.budgetAccounts[0]?.budget.id;
+    return options.budgetAccounts
+      .map(
+        (b) =>
+          `<option value="${escapeHtml(b.budget.id)}"${b.budget.id === selected ? ' selected' : ''}>` +
+          `${escapeHtml(b.budget.name)}</option>`
+      )
+      .join('');
+  };
 
   const rows = options.items
     .map((item) => {
@@ -224,7 +231,7 @@ export function pairingPage(options: PairingPageOptions): string {
       return `<tr>
         <td>${escapeHtml(item.name)}<div class="muted">${escapeHtml(item.currency)} &middot; ${escapeHtml(kind)}</div></td>
         <td>
-          <select name="${escapeHtml(budgetSelectName)}" class="budget" data-target="${escapeHtml(accountSelectId)}">${budgetOptions}</select>
+          <select name="${escapeHtml(budgetSelectName)}" class="budget" data-target="${escapeHtml(accountSelectId)}">${budgetOptionsFor(item.budgetId)}</select>
           <select name="${escapeHtml(mapSelectName)}" id="${escapeHtml(accountSelectId)}" class="account">
             <option value="">— skip —</option>
             ${accountOptions}
@@ -249,6 +256,7 @@ export function pairingPage(options: PairingPageOptions): string {
      ${noBudgets}
      <form method="post" action="/pair">
        <input type="hidden" name="pairingId" value="${escapeHtml(options.pairingId)}">
+       <noscript><p class="muted">JavaScript is off, so every account is listed. Each Actual account you choose must belong to the budget selected beside it, otherwise sync will fail for that account.</p></noscript>
        <table>
          <thead><tr><th>TrueLayer</th><th>Budget &middot; Actual account</th></tr></thead>
          <tbody>${rows}</tbody>

@@ -116,7 +116,7 @@ describe('pairingPage budgets', () => {
     assert.equal((html.match(/<select name="budget_tl\d" class="budget"/g) ?? []).length, 2);
     assert.ok(html.includes('name="budget_tl1"'));
     assert.ok(html.includes('data-target="acct_tl1"'));
-    const first = html.indexOf('<option value="default">Default</option>');
+    const first = html.indexOf('<option value="default" selected>Default</option>');
     const second = html.indexOf('<option value="budget_2">Joint &lt;b&gt;</option>');
     assert.ok(first !== -1 && second > first, 'default budget option listed first');
     assert.equal(html.includes('Joint <b>'), false);
@@ -204,5 +204,35 @@ describe('reauthWarnDays', () => {
   after(() => {
     if (original === undefined) delete process.env.REAUTH_WARN_DAYS;
     else process.env.REAUTH_WARN_DAYS = original;
+  });
+});
+
+describe('pairingPage budget selection', () => {
+  const budgetAccounts = [
+    { budget: { id: 'b1', name: 'First', syncId: 's1' }, accounts: [] },
+    { budget: { id: 'b"2', name: 'Second', syncId: 's2' }, accounts: [] },
+  ];
+  const base = { truelayerAccountId: 'tl1', name: 'Current', accountKind: 'account' as const, currency: 'GBP' };
+
+  it('selects the first (default) budget when unpaired', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [base], budgetAccounts });
+    assert.ok(html.includes('<option value="b1" selected>First</option>'));
+    assert.equal(html.includes('selected>Second'), false);
+  });
+
+  it('selects the existing budget, escaped', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [{ ...base, budgetId: 'b"2' }], budgetAccounts });
+    assert.ok(html.includes('<option value="b&quot;2" selected>Second</option>'));
+    assert.equal(html.includes('value="b1" selected'), false);
+  });
+
+  it('falls back to the default when the existing budget is unknown', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [{ ...base, budgetId: 'gone' }], budgetAccounts });
+    assert.ok(html.includes('value="b1" selected'));
+  });
+
+  it('warns without JavaScript that accounts must match the budget', () => {
+    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [base], budgetAccounts });
+    assert.match(html, /<noscript>[^]*must belong to the budget selected/);
   });
 });
