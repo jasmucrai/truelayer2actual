@@ -6,12 +6,17 @@ import os from 'os';
 import path from 'path';
 import { once } from 'events';
 import type { Express } from 'express';
+import { createHash } from 'crypto';
 import { setTokensPathForTests, saveConnection } from '../src/auth/tokens.js';
+import { setConfigPathForTests } from '../src/config.js';
+import { pairingPage, PAIRING_SCRIPT_CSP_SOURCE } from '../src/web/pages.js';
 
 // Point tokens.json at a temp dir before importing the server (paths are
 // resolved lazily on first use, same pattern as test/state.test.ts).
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 't2a-server-test-'));
 setTokensPathForTests(path.join(tmpDir, 'tokens.json'));
+const configFile = path.join(tmpDir, 'config.json');
+setConfigPathForTests(configFile);
 
 const { createApp, hostAllowed } = await import('../src/web/server.js');
 
@@ -388,5 +393,108 @@ describe('Host allow-list (DNS-rebinding defence)', () => {
   it('keeps /healthz reachable whatever the Host', async () => {
     const res = await request(app, '/healthz', { headers: { Host: 'anything.example.com' } });
     assert.equal(res.status, 200);
+  });
+});
+
+describe('Content-Security-Policy script-src', () => {
+  it('allows exactly the pairing script hash on /pair/*', async () => {
+    const res = await request(app, '/pair/does-not-exist');
+    const csp = res.headers['content-security-policy'] ?? '';
+    assert.ok(csp.includes(`script-src ${PAIRING_SCRIPT_CSP_SOURCE};`), csp);
+    assert.match(csp, /default-src 'none'/);
+  });
+
+  it('has no script-src on the dashboard', async () => {
+    const res = await request(app, '/');
+    assert.doesNotMatch(res.headers['content-security-policy'] ?? '', /script-src/);
+  });
+
+  it('matches the hash of the inline script embedded in pairingPage output', () => {
+    const html = pairingPage({ pairingId: 'p1', provider: 'Bank', items: [], budgetAccounts: [] });
+    const match = html.match(/<script>([\s\S]*?)<\/script>/);
+    assert.ok(match, 'pairing page has an inline script');
+    const hash = createHash('sha256').update(match[1]).digest('base64');
+    assert.equal(PAIRING_SCRIPT_CSP_SOURCE, `'sha256-${hash}'`);
+  });
+});
+
+describe('POST /budgets', () => {
+  const sameOrigin = () => ({ Origin: `http://127.0.0.1:${serverAddress.port}` });
+  const form = (fields: Record<string, string>) => new URLSearchParams(fields).toString();
+  const readBudgets = (): { id: string; name: string; syncId: string; encryptionPassword?: string }[] =>
+    JSON.parse(fs.readFileSync(configFile, 'utf-8')).budgets;
+
+  before(() => {
+    fs.rmSync(configFile, { force: true });
+  });
+
+  it('rejects a cross-site Origin with 403 and writes nothing', async () => {
+    const res = await request(app, '/budgets', {
+      method: 'POST',
+      headers: { Origin: 'https://evil.example.com' },
+      body: form({ name: 'Evil', syncId: 'sync-evil' }),
+    });
+    assert.equal(res.status, 403);
+    assert.equal(fs.existsSync(configFile), false);
+  });
+
+  it('returns 400 when the name or sync id is missing', async () => {
+    for (const body of [form({ syncId: 'sync-x' }), form({ name: 'X' }), form({ name: ' ', syncId: '' })]) {
+      const res = await request(app, '/budgets', { method: 'POST', headers: sameOrigin(), body });
+      assert.equal(res.status, 400, body);
+    }
+    assert.equal(fs.existsSync(configFile), false);
+  });
+
+  it('adds a budget and redirects to the dashboard without a pairingId', async () => {
+    const res = await request(app, '/budgets', {
+      method: 'POST',
+      headers: sameOrigin(),
+      body: form({ name: 'Joint', syncId: 'sync-joint', encryptionPassword: 'pw' }),
+    });
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.location, '/?msg=' + encodeURIComponent('Added budget "Joint".'));
+    const budgets = readBudgets();
+    assert.equal(budgets.length, 1);
+    assert.equal(budgets[0].syncId, 'sync-joint');
+    assert.equal(budgets[0].encryptionPassword, 'pw');
+    assert.match(budgets[0].id, /^budget_[0-9a-f]{12}$/);
+  });
+
+  it('redirects back to the pairing page after adding when a pairingId is given', async () => {
+    const res = await request(app, '/budgets', {
+      method: 'POST',
+      headers: sameOrigin(),
+      body: form({ name: 'Savings', syncId: 'sync-savings', pairingId: 'pair 1' }),
+    });
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.location, '/pair/pair%201');
+    assert.equal(readBudgets().length, 2);
+  });
+
+  it('redirects a duplicate sync id back to /pair/<id>?err=<message> when a pairingId is given', async () => {
+    const before = fs.readFileSync(configFile, 'utf-8');
+    const res = await request(app, '/budgets', {
+      method: 'POST',
+      headers: sameOrigin(),
+      body: form({ name: 'Again', syncId: 'sync-joint', pairingId: 'pair1' }),
+    });
+    assert.equal(res.status, 302);
+    const location = res.headers.location ?? '';
+    assert.ok(location.startsWith('/pair/pair1?err='), location);
+    const err = decodeURIComponent(location.slice('/pair/pair1?err='.length));
+    assert.match(err, /Sync ID sync-joint is already used by budget "Joint"/);
+    assert.equal(fs.readFileSync(configFile, 'utf-8'), before);
+  });
+
+  it('returns 400 for a duplicate sync id without a pairingId', async () => {
+    const res = await request(app, '/budgets', {
+      method: 'POST',
+      headers: sameOrigin(),
+      body: form({ name: 'Again', syncId: 'sync-joint' }),
+    });
+    assert.equal(res.status, 400);
+    assert.match(res.body, /already used by budget/);
+    assert.equal(readBudgets().length, 2);
   });
 });

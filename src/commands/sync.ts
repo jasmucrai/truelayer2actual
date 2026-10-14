@@ -32,7 +32,7 @@ import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
 import { describeError } from '../util/errors.js';
 import { logger } from '../logger.js';
-import type { Account, Budget } from '../config.js';
+import type { Account, Budget, Config } from '../config.js';
 
 /** Prevents two full syncs from overlapping (token rotation, double import). */
 const withSyncLock = createMutex();
@@ -330,6 +330,62 @@ async function syncAccount(
   }
 }
 
+export interface BudgetGroup {
+  budget: Budget;
+  /** Every account mapped to the budget. */
+  accounts: Account[];
+  /** Accounts whose connection has a usable access token. */
+  ready: Account[];
+}
+
+export interface BudgetGrouping {
+  /** Known budgets with at least one ready account (the ones to sync). */
+  groups: BudgetGroup[];
+  /** Budgets skipped because none of their banks are usable this run. */
+  skipped: BudgetGroup[];
+  /** Accounts that reference a budget id missing from the config. */
+  errors: { connectionId: string; account: string; reason: string }[];
+}
+
+/**
+ * Pure planning step of a sync: bucket accounts by budget, flag accounts whose
+ * budget no longer exists, and drop budgets with no usable connection so the
+ * (slow) budget download is skipped.
+ */
+export function groupAccountsByBudget(
+  config: Pick<Config, 'budgets' | 'accounts'>,
+  accessTokens: { has(connectionId: string): boolean }
+): BudgetGrouping {
+  const budgetById = new Map<string, Budget>(config.budgets.map((b) => [b.id, b]));
+  const accountsByBudget = new Map<string, Account[]>();
+  for (const account of config.accounts) {
+    const list = accountsByBudget.get(account.budgetId) ?? [];
+    list.push(account);
+    accountsByBudget.set(account.budgetId, list);
+  }
+
+  const result: BudgetGrouping = { groups: [], skipped: [], errors: [] };
+  for (const [budgetId, accounts] of accountsByBudget) {
+    const budget = budgetById.get(budgetId);
+    if (!budget) {
+      for (const account of accounts) {
+        result.errors.push({
+          connectionId: account.connectionId,
+          account: account.name,
+          reason: `Unknown budget "${budgetId}" — run "npm run setup" to reconfigure.`,
+        });
+      }
+      continue;
+    }
+
+    const ready = accounts.filter((a) => accessTokens.has(a.connectionId));
+    const group = { budget, accounts, ready };
+    if (ready.length === 0) result.skipped.push(group);
+    else result.groups.push(group);
+  }
+  return result;
+}
+
 async function runSyncInternal(): Promise<SyncSummary> {
   logger.info('Starting truelayer2actual sync...');
 
@@ -353,31 +409,10 @@ async function runSyncInternal(): Promise<SyncSummary> {
 
   // Group accounts by Actual budget and sync each budget in turn, switching the
   // Active Budget client to the right budget before touching its accounts.
-  const budgetById = new Map<string, Budget>(config.budgets.map((b) => [b.id, b]));
-  const accountsByBudget = new Map<string, Account[]>();
-  for (const account of config.accounts) {
-    const list = accountsByBudget.get(account.budgetId) ?? [];
-    list.push(account);
-    accountsByBudget.set(account.budgetId, list);
-  }
+  const grouping = groupAccountsByBudget(config, accessTokens);
+  summary.errors.push(...grouping.errors);
 
-  for (const [budgetId, accounts] of accountsByBudget) {
-    const budget = budgetById.get(budgetId);
-    if (!budget) {
-      for (const account of accounts) {
-        summary.errors.push({
-          connectionId: account.connectionId,
-          account: account.name,
-          reason: `Unknown budget "${budgetId}" — run "npm run setup" to reconfigure.`,
-        });
-      }
-      continue;
-    }
-
-    // Skip the (slow) budget download when none of its banks are usable.
-    const ready = accounts.filter((a) => accessTokens.has(a.connectionId));
-    if (ready.length === 0) continue;
-
+  for (const { budget, accounts, ready } of grouping.groups) {
     try {
       await withBudget(budget, async () => {
         for (const account of ready) {

@@ -1,6 +1,15 @@
-import { describe, it } from 'node:test';
+import { describe, it, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import {
+  setConfigPathForTests,
+  loadConfig,
+  listBudgets,
+  addBudget,
+  budgetFromEnv,
+
   mergeAccounts,
   reconcileConfigAccounts,
   findBudgetBySyncId,
@@ -154,5 +163,247 @@ describe('DuplicateSyncIdError', () => {
     const err = new DuplicateSyncIdError('sync-a', { id: 'default', name: 'Default', syncId: 'sync-a' });
     assert.equal(err.name, 'DuplicateSyncIdError');
     assert.match(err.message, /already used by budget "Default"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// File-backed tests (legacy migration, addBudget)
+// ---------------------------------------------------------------------------
+
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 't2a-config-test-'));
+const configPath = path.join(tmpDir, 'config.json');
+setConfigPathForTests(configPath);
+
+const savedEnv = {
+  syncId: process.env.ACTUAL_SYNC_ID,
+  password: process.env.ACTUAL_ENCRYPTION_PASSWORD,
+};
+
+function writeConfig(data: unknown): void {
+  fs.writeFileSync(configPath, JSON.stringify(data));
+}
+
+function readConfig(): { budgets: Budget[]; accounts: Account[] } {
+  return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+}
+
+beforeEach(() => {
+  fs.rmSync(configPath, { force: true });
+  delete process.env.ACTUAL_SYNC_ID;
+  delete process.env.ACTUAL_ENCRYPTION_PASSWORD;
+});
+
+after(() => {
+  if (savedEnv.syncId === undefined) delete process.env.ACTUAL_SYNC_ID;
+  else process.env.ACTUAL_SYNC_ID = savedEnv.syncId;
+  if (savedEnv.password === undefined) delete process.env.ACTUAL_ENCRYPTION_PASSWORD;
+  else process.env.ACTUAL_ENCRYPTION_PASSWORD = savedEnv.password;
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+const legacyAccount = {
+  name: 'Current',
+  connectionId: 'conn_1',
+  truelayerAccountId: 'tl-1',
+  actualAccountId: 'actual-1',
+};
+
+describe('budgetFromEnv', () => {
+  it('returns null when ACTUAL_SYNC_ID is unset', () => {
+    assert.equal(budgetFromEnv(), null);
+  });
+
+  it('builds the default budget from env vars', () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    process.env.ACTUAL_ENCRYPTION_PASSWORD = 'pw';
+    assert.deepEqual(budgetFromEnv(), {
+      id: 'default',
+      name: 'Default',
+      syncId: 'env-sync',
+      encryptionPassword: 'pw',
+    });
+  });
+
+  it('treats an empty encryption password as unset', () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    process.env.ACTUAL_ENCRYPTION_PASSWORD = '';
+    assert.equal(budgetFromEnv()?.encryptionPassword, undefined);
+  });
+});
+
+describe('loadConfig legacy migration', () => {
+  it('seeds a "default" budget from env and defaults account budgetId', async () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    process.env.ACTUAL_ENCRYPTION_PASSWORD = 'pw';
+    writeConfig({
+      accounts: [legacyAccount, { ...legacyAccount, truelayerAccountId: 'tl-2' }],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const config = await loadConfig();
+
+    assert.equal(config.budgets.length, 1);
+    assert.equal(config.budgets[0].id, 'default');
+    assert.equal(config.budgets[0].syncId, 'env-sync');
+    assert.equal(config.budgets[0].encryptionPassword, 'pw');
+    assert.deepEqual(config.accounts.map((a) => a.budgetId), ['default', 'default']);
+  });
+
+  it('does not rewrite the legacy file when loading', async () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    writeConfig({ accounts: [legacyAccount], createdAt: '2026-01-01T00:00:00.000Z' });
+    const before = fs.readFileSync(configPath, 'utf-8');
+    await loadConfig();
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+  });
+
+  it('yields no budget when env is unset, and listBudgets is empty', async () => {
+    writeConfig({ accounts: [legacyAccount], createdAt: '2026-01-01T00:00:00.000Z' });
+
+    const config = await loadConfig();
+
+    assert.deepEqual(config.budgets, []);
+    assert.equal(config.accounts[0].budgetId, 'default');
+    assert.deepEqual(await listBudgets(), []);
+  });
+
+  it('leaves existing budgets alone and defaults unset account budgetId to "default"', async () => {
+    writeConfig({
+      budgets: [{ id: 'budget_1', name: 'Joint', syncId: 'sync-j' }],
+      accounts: [legacyAccount],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const config = await loadConfig();
+
+    assert.deepEqual(config.budgets.map((b) => b.id), ['budget_1']);
+    assert.equal(config.accounts[0].budgetId, 'default');
+  });
+
+  it('prepends the env default budget when accounts reference "default" but it is missing', async () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    writeConfig({
+      budgets: [{ id: 'budget_1', name: 'Joint', syncId: 'sync-j' }],
+      accounts: [legacyAccount, { ...legacyAccount, truelayerAccountId: 'tl-2', budgetId: 'budget_1' }],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const config = await loadConfig();
+
+    assert.deepEqual(config.budgets.map((b) => b.id), ['default', 'budget_1']);
+  });
+
+  it('does not add the env budget when no account references "default"', async () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    writeConfig({
+      budgets: [{ id: 'budget_1', name: 'Joint', syncId: 'sync-j' }],
+      accounts: [{ ...legacyAccount, budgetId: 'budget_1' }],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const config = await loadConfig();
+
+    assert.deepEqual(config.budgets.map((b) => b.id), ['budget_1']);
+  });
+});
+
+describe('listBudgets', () => {
+  it('returns the env budget when there is no config file', async () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    const budgets = await listBudgets();
+    assert.equal(budgets.length, 1);
+    assert.equal(budgets[0].id, 'default');
+    assert.equal(budgets[0].syncId, 'env-sync');
+  });
+
+  it('returns [] with no config file and no env', async () => {
+    assert.deepEqual(await listBudgets(), []);
+  });
+
+  it('prefers configured budgets over the env fallback', async () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    writeConfig({
+      budgets: [{ id: 'budget_1', name: 'Joint', syncId: 'sync-j' }],
+      accounts: [],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    assert.deepEqual((await listBudgets()).map((b) => b.id), ['budget_1']);
+  });
+
+  it('falls back to the env budget when the config is corrupt', async () => {
+    process.env.ACTUAL_SYNC_ID = 'env-sync';
+    fs.writeFileSync(configPath, '{ broken');
+    assert.deepEqual((await listBudgets()).map((b) => b.id), ['default']);
+  });
+});
+
+describe('addBudget', () => {
+  const baseConfig = () => ({
+    budgets: [{ id: 'budget_1', name: 'Joint', syncId: 'sync-j' }],
+    accounts: [{ ...legacyAccount, budgetId: 'budget_1' }],
+    createdAt: '2026-01-01T00:00:00.000Z',
+  });
+
+  it('creates the config file when it does not exist', async () => {
+    const budgets = await addBudget({ id: 'budget_new', name: 'New', syncId: 'sync-n' });
+    assert.deepEqual(budgets.map((b) => b.id), ['budget_new']);
+    assert.deepEqual(readConfig().budgets.map((b) => b.id), ['budget_new']);
+    assert.deepEqual(readConfig().accounts, []);
+  });
+
+  it('appends to existing budgets and preserves accounts', async () => {
+    writeConfig(baseConfig());
+    await addBudget({ id: 'budget_2', name: 'Savings', syncId: 'sync-s' });
+    const saved = readConfig();
+    assert.deepEqual(saved.budgets.map((b) => b.id), ['budget_1', 'budget_2']);
+    assert.equal(saved.accounts.length, 1);
+  });
+
+  it('rejects a duplicate sync id with DuplicateSyncIdError and leaves the config unchanged', async () => {
+    writeConfig(baseConfig());
+    const before = fs.readFileSync(configPath, 'utf-8');
+
+    await assert.rejects(
+      () => addBudget({ id: 'budget_dup', name: 'Dup', syncId: 'sync-j' }),
+      (err: unknown) => {
+        assert.ok(err instanceof DuplicateSyncIdError);
+        assert.equal(err.existing.id, 'budget_1');
+        return true;
+      }
+    );
+
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+  });
+
+  it('allows re-saving the same budget id with the same sync id (update in place)', async () => {
+    writeConfig(baseConfig());
+    const budgets = await addBudget({ id: 'budget_1', name: 'Renamed', syncId: 'sync-j' });
+    assert.equal(budgets.length, 1);
+    assert.equal(readConfig().budgets[0].name, 'Renamed');
+  });
+
+  it('rejects and does not overwrite a corrupt config file', async () => {
+    fs.writeFileSync(configPath, '{ broken json');
+    await assert.rejects(() => addBudget({ id: 'budget_new', name: 'New', syncId: 'sync-n' }));
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), '{ broken json');
+  });
+
+  it('keeps both budgets for concurrent adds with different sync ids', async () => {
+    await Promise.all([
+      addBudget({ id: 'budget_a', name: 'A', syncId: 'sync-a' }),
+      addBudget({ id: 'budget_b', name: 'B', syncId: 'sync-b' }),
+    ]);
+    assert.deepEqual(readConfig().budgets.map((b) => b.id).sort(), ['budget_a', 'budget_b']);
+  });
+
+  it('lets exactly one of two concurrent adds with the same sync id win', async () => {
+    const results = await Promise.allSettled([
+      addBudget({ id: 'budget_a', name: 'A', syncId: 'sync-same' }),
+      addBudget({ id: 'budget_b', name: 'B', syncId: 'sync-same' }),
+    ]);
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    assert.ok(rejected.reason instanceof DuplicateSyncIdError);
+    assert.equal(readConfig().budgets.length, 1);
   });
 });
