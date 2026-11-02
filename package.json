@@ -14,7 +14,7 @@
     "test": "node --import tsx/esm --test test/*.test.ts"
   },
   "dependencies": {
-    "@actual-app/api": "26.10.0",
+    "@actual-app/api": "^26.11.0",
     "axios": "^1",
     "dotenv": "^16",
     "express": "^4",
