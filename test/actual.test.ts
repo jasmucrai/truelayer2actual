@@ -47,6 +47,10 @@ const mockExports = {
     mock.calls.push('sync');
     await mock.onSync();
   },
+  importTransactions: async () => {
+    mock.calls.push('importTransactions');
+    return { added: ['t1'], updated: [] };
+  },
   getAccounts: async () => {
     mock.calls.push('getAccounts');
     return [
@@ -82,7 +86,7 @@ const savedEnv = {
 process.env.ACTUAL_SERVER_URL = 'http://actual.invalid';
 process.env.ACTUAL_PASSWORD = 'secret';
 process.chdir(tmpDir);
-const { switchBudget, withBudget, getActualError, shutdownActual, getActualAccounts } = await import('../src/clients/actual.js');
+const { switchBudget, withBudget, getActualError, shutdownActual, getActualAccounts, importToActual } = await import('../src/clients/actual.js');
 process.chdir(originalCwd);
 
 after(async () => {
@@ -269,5 +273,30 @@ describe('getActualAccounts', () => {
     const accounts = await getActualAccounts();
     assert.deepEqual(mock.calls, ['sync', 'getAccounts']);
     assert.deepEqual(accounts.map((a) => a.id), ['a1']);
+  });
+});
+
+describe('importToActual', () => {
+  it('syncs before importing so rules and edits made in Actual are current', async () => {
+    resetMock();
+    const result = await importToActual('a1', [{ date: '2026-10-30', amount: 100 } as never]);
+    assert.deepEqual(mock.calls, ['sync', 'importTransactions']);
+    assert.deepEqual(result.added, ['t1']);
+  });
+
+  it('still imports when the sync fails', async () => {
+    resetMock();
+    mock.onSync = () => {
+      throw new Error('network-failure');
+    };
+    await importToActual('a1', [{ date: '2026-10-30', amount: 100 } as never]);
+    assert.deepEqual(mock.calls, ['sync', 'importTransactions']);
+  });
+
+  it('does nothing for an empty batch', async () => {
+    resetMock();
+    const result = await importToActual('a1', []);
+    assert.deepEqual(mock.calls, []);
+    assert.deepEqual(result, { added: [], updated: [] });
   });
 });
