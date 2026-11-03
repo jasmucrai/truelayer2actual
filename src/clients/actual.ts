@@ -296,6 +296,17 @@ export async function importToActual(
     `Importing ${transactions.length} transaction(s) into Actual account ${accountId}`
   );
 
+  // The loaded budget is reused across syncs, so pull remote changes first.
+  // Otherwise rules added in Actual since it was loaded are not applied, and
+  // when an existing transaction is reconciled as "updated", the stale local
+  // copy is written back, undoing edits made in Actual in the meantime (for
+  // example a category set by hand). Best effort, as in getActualAccounts.
+  try {
+    await (api as unknown as { sync: () => Promise<void> }).sync();
+  } catch (err) {
+    logger.warn('Could not sync Actual Budget before importing:', describeError(err));
+  }
+
   const result = await (api as unknown as {
     importTransactions: (
       accountId: string,
