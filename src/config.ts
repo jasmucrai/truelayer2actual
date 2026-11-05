@@ -33,6 +33,14 @@ const ConfigSchema = z.object({
   createdAt: z.string(),
 });
 
+/**
+ * Identity of a pairing: one bank account may sync into several budgets, but
+ * at most once per budget.
+ */
+export function mappingKey(a: { truelayerAccountId: string; budgetId: string }): string {
+  return `${a.truelayerAccountId}__${a.budgetId}`;
+}
+
 export type Budget = z.infer<typeof BudgetSchema>;
 export type Account = z.infer<typeof AccountSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
@@ -217,6 +225,25 @@ export async function loadConfig(): Promise<Config> {
   }
 
   const config = normalizeBudgets(result.data);
+
+  // Drop duplicate pairings (same connection, bank account and budget), keeping the first.
+  const seen = new Set<string>();
+  const deduped: Account[] = [];
+  for (const account of config.accounts) {
+    // Scoped by connection so two banks reusing an id are never merged.
+    const key = `${account.connectionId}:${mappingKey(account)}`;
+    if (seen.has(key)) {
+      logger.warn(
+        `Ignoring duplicate pairing for "${account.name}" in budget "${account.budgetId}" ` +
+          `(Actual account ${account.actualAccountId}); the first entry is kept.`
+      );
+      continue;
+    }
+    seen.add(key);
+    deduped.push(account);
+  }
+  if (deduped.length !== config.accounts.length) config.accounts = deduped;
+
   logger.debug(
     `Loaded config with ${config.accounts.length} account(s) across ${config.budgets.length} budget(s)`
   );
@@ -237,15 +264,14 @@ export async function saveConfig(config: Config): Promise<void> {
 
 /**
  * Merge incoming account pairings into an existing list, keyed by
- * `truelayerAccountId`. Existing entries keep any fields not overwritten
+ * {@link mappingKey} (bank account + budget). Existing entries keep any fields not overwritten
  * (notably `lastSyncedAt`) so re-auth never resets sync history.
  */
 export function mergeAccounts(existing: Account[], incoming: Account[]): Account[] {
   const merged: Account[] = [...existing];
   for (const account of incoming) {
-    const idx = merged.findIndex(
-      (a) => a.truelayerAccountId === account.truelayerAccountId
-    );
+    const key = mappingKey(account);
+    const idx = merged.findIndex((a) => mappingKey(a) === key);
     if (idx !== -1) {
       merged[idx] = { ...merged[idx], ...account };
     } else {
@@ -255,9 +281,11 @@ export function mergeAccounts(existing: Account[], incoming: Account[]): Account
   return merged;
 }
 
-/** A new target for an existing mapping. An empty `actualAccountId` removes it. */
+/**
+ * A new target for an existing mapping (the budget is part of its key and
+ * cannot change). An empty `actualAccountId` removes it.
+ */
 export interface PairingChange {
-  budgetId: string;
   actualAccountId: string;
 }
 
@@ -268,10 +296,11 @@ export interface ApplyPairingChangesResult {
 }
 
 /**
- * Re-point existing mappings at a different budget/Actual account, or drop a
- * mapping when `actualAccountId` is empty. Only accounts on `connectionId` are
- * considered, so the dashboard cannot touch another bank's pairings. Pure
- * helper so the edit route is unit-testable.
+ * Re-point existing mappings at a different Actual account, or drop a mapping
+ * when `actualAccountId` is empty. `changes` is keyed by {@link mappingKey}.
+ * Only accounts on `connectionId` are considered, so the dashboard cannot
+ * touch another bank's pairings. Pure helper so the edit route is
+ * unit-testable.
  */
 export function applyPairingChanges(
   accounts: Account[],
@@ -288,9 +317,8 @@ export function applyPairingChanges(
       continue;
     }
 
-    const change = Object.hasOwn(changes, account.truelayerAccountId)
-      ? changes[account.truelayerAccountId]
-      : undefined;
+    const key = mappingKey(account);
+    const change = Object.hasOwn(changes, key) ? changes[key] : undefined;
     if (!change) {
       next.push(account);
       continue;
@@ -301,13 +329,9 @@ export function applyPairingChanges(
       continue;
     }
 
-    if (account.actualAccountId !== change.actualAccountId || account.budgetId !== change.budgetId) {
+    if (account.actualAccountId !== change.actualAccountId) {
       changed++;
-      next.push({
-        ...account,
-        budgetId: change.budgetId,
-        actualAccountId: change.actualAccountId,
-      });
+      next.push({ ...account, actualAccountId: change.actualAccountId });
     } else {
       next.push(account);
     }

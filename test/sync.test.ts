@@ -16,7 +16,7 @@ require.cache[resolvedApiPath] = {
   exports: {},
 } as unknown as NodeJS.Module;
 
-const { groupAccountsByBudget, resolveSyncWindow, syncLookbackDays, resolveIntervalHours } = await import('../src/commands/sync.js');
+const { groupAccountsByBudget, planFetches, resolveSyncWindow, syncLookbackDays, resolveIntervalHours } = await import('../src/commands/sync.js');
 import type { Account, Budget } from '../src/config.js';
 
 function account(overrides: Partial<Account> = {}): Account {
@@ -96,6 +96,43 @@ describe('groupAccountsByBudget', () => {
   it('returns nothing for no accounts', () => {
     const result = groupAccountsByBudget({ budgets, accounts: [] }, new Map());
     assert.deepEqual(result, { groups: [], skipped: [], errors: [] });
+  });
+});
+
+describe('planFetches', () => {
+  const now = Date.parse('2026-06-15T12:00:00Z');
+
+  it('plans one fetch per bank account across budgets, using the earliest window', () => {
+    const accounts = [
+      account({ budgetId: 'default', lastSyncedAt: '2026-06-14T00:00:00Z' }),
+      account({ budgetId: 'budget_1', lastSyncedAt: '2026-06-01T00:00:00Z' }),
+      account({ truelayerAccountId: 'tl-2', budgetId: 'default', accountKind: 'card' }),
+    ];
+    const plan = planFetches(accounts, 7, now);
+
+    assert.equal(plan.length, 2);
+    const first = plan.find((p) => p.truelayerAccountId === 'tl-1')!;
+    assert.equal(first.from, '2026-06-01');
+    assert.equal(first.to, '2026-06-15');
+    assert.equal(plan.find((p) => p.truelayerAccountId === 'tl-2')!.accountKind, 'card');
+  });
+
+  it('uses the lookback floor for a mapping that has never synced', () => {
+    const accounts = [
+      account({ budgetId: 'default', lastSyncedAt: '2026-06-14T00:00:00Z' }),
+      account({ budgetId: 'budget_1' }),
+    ];
+    const [item] = planFetches(accounts, 7, now);
+    assert.equal(item.from, '2026-06-08');
+  });
+
+  it('keeps the same account id on different connections separate', () => {
+    const plan = planFetches(
+      [account({ connectionId: 'conn_a' }), account({ connectionId: 'conn_b', budgetId: 'budget_1' })],
+      7,
+      now
+    );
+    assert.equal(plan.length, 2);
   });
 });
 

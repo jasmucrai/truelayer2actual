@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import type { ActualAccount } from '../clients/actual.js';
 import type { Budget } from '../config.js';
 import type { PairingItem } from './oauth.js';
@@ -29,7 +28,12 @@ const STYLES = `
   .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   table { width: 100%; border-collapse: collapse; }
   td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid #8884; }
-  select { font: inherit; padding: 4px; }
+  select { font: inherit; padding: 4px; max-width: 100%; }
+  .targets { display: grid; gap: 6px; }
+  .target { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .target > span { min-width: 7em; }
+  .stale { color: #b45309; font-size: 0.9em; }
+  .pairings { list-style: none; margin: 4px 0; padding: 0; }
   .banner { padding: 10px 14px; border-radius: 8px; background: #2563eb22; margin-bottom: 16px; }
   .error { padding: 10px 14px; border-radius: 8px; background: #dc262622; margin-bottom: 16px; }
   code { background: #8882; padding: 2px 5px; border-radius: 4px; }
@@ -85,7 +89,14 @@ export type ConnectionStatus = 'healthy' | 'expiring' | 'reauth_needed';
 export interface ConnectionView {
   id: string;
   provider: string;
+  /** Distinct bank accounts with at least one mapping. */
   accountCount: number;
+  /** Total mappings (bank account x budget). */
+  pairingCount?: number;
+  /** One summary line per bank account, e.g. "Current Account → Personal, Joint". */
+  pairings?: { label: string }[];
+  /** Mappings that have not synced recently, e.g. "Joint · Current Account last synced …". */
+  staleTargets?: string[];
   lastSyncedAt?: string;
   consentExpiresAt?: string;
   daysLeft?: number;
@@ -99,7 +110,7 @@ export interface DashboardData {
   error?: string;
 }
 
-function formatDate(iso?: string): string {
+export function formatDate(iso?: string): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
@@ -117,6 +128,17 @@ export function dashboardPage(data: DashboardData): string {
       const expiry = c.consentExpiresAt
         ? `${formatDate(c.consentExpiresAt)}${c.daysLeft !== undefined ? ` (${c.daysLeft}d left)` : ''}`
         : 'unknown';
+      const pairingCount = c.pairingCount ?? c.accountCount;
+      const mappedText =
+        pairingCount === c.accountCount
+          ? `${c.accountCount}`
+          : `${c.accountCount} &rarr; ${pairingCount} targets`;
+      const pairingList = c.pairings?.length
+        ? `<ul class="pairings muted">${c.pairings.map((p) => `<li>${escapeHtml(p.label)}</li>`).join('')}</ul>`
+        : '';
+      const stale = (c.staleTargets ?? [])
+        .map((t) => `<div class="stale">${escapeHtml(t)}</div>`)
+        .join('');
       const reason = c.reason ? `<div class="muted">Reason: ${escapeHtml(c.reason)}</div>` : '';
       return `<div class="conn">
         <div class="conn-header">
@@ -124,7 +146,9 @@ export function dashboardPage(data: DashboardData): string {
           <span class="badge ${escapeHtml(c.status)}">${escapeHtml(c.status.replace('_', ' '))}</span>
         </div>
         <div class="muted">Connection <code>${escapeHtml(c.id)}</code></div>
-        <div>Accounts mapped: ${c.accountCount} &middot; Last sync: ${formatDate(c.lastSyncedAt)}</div>
+        <div>Accounts mapped: ${mappedText} &middot; Last sync: ${formatDate(c.lastSyncedAt)}</div>
+        ${pairingList}
+        ${stale}
         <div>Consent expiry: ${expiry}</div>
         ${reason}
         <div class="row">
@@ -156,65 +180,71 @@ export function dashboardPage(data: DashboardData): string {
   );
 }
 
-/**
- * Progressive-enhancement script for the pairing page: filters each account
- * select to the chosen budget. The dashboard CSP forbids scripts by default;
- * the server allows exactly this one on /pair/* via its hash.
- */
-const PAIRING_SCRIPT = `
-  (function () {
-    function sync(budgetSelect) {
-      var target = document.getElementById(budgetSelect.getAttribute('data-target'));
-      if (!target) return;
-      var budgetId = budgetSelect.value;
-      Array.prototype.forEach.call(target.options, function (o) {
-        if (o.value === '') return;
-        o.hidden = o.getAttribute('data-budget') !== budgetId;
-      });
-      var selected = target.options[target.selectedIndex];
-      if (selected && selected.hidden) target.value = '';
-    }
-    var selects = document.querySelectorAll('select.budget');
-    Array.prototype.forEach.call(selects, function (s) {
-      s.addEventListener('change', function () { sync(s); });
-      sync(s);
-    });
-  })();
-  `;
-
-export const PAIRING_SCRIPT_CSP_SOURCE = `'sha256-${createHash('sha256').update(PAIRING_SCRIPT).digest('base64')}'`;
-
 export interface BudgetAccounts {
   budget: Budget;
   accounts: ActualAccount[];
 }
 
-/**
- * Render the combined "budget / account" options. When a selected account id
- * is given, the matching option is marked selected server-side so an editing
- * form shows the current pairing before any JavaScript runs.
- */
-function renderAccountOptions(
-  budgetAccounts: BudgetAccounts[],
-  selectedBudgetId?: string,
-  selectedActualAccountId?: string
+const NOT_SYNCED = '— not synced —';
+const REMOVE = '— remove —';
+
+function accountOption(a: ActualAccount, selectedId?: string): string {
+  return (
+    `<option value="${escapeHtml(a.id)}"${a.id === selectedId ? ' selected' : ''}>` +
+    `${escapeHtml(a.name)}${a.offbudget ? ' (off-budget)' : ''}</option>`
+  );
+}
+
+function targetLine(
+  fieldName: string,
+  label: string | undefined,
+  ariaLabel: string,
+  optionsHtml: string
 ): string {
-  return budgetAccounts
-    .flatMap(({ budget, accounts }) =>
-      accounts.map((a) => {
-        const isSelected =
-          selectedActualAccountId !== undefined &&
-          a.id === selectedActualAccountId &&
-          budget.id === selectedBudgetId;
-        return (
-          `<option value="${escapeHtml(a.id)}" data-budget="${escapeHtml(budget.id)}"` +
-          `${isSelected ? ' selected' : ''}>` +
-          `${escapeHtml(budget.name)} / ${escapeHtml(a.name)}` +
-          `${a.offbudget ? ' (off-budget)' : ''}</option>`
-        );
-      })
-    )
-    .join('');
+  return `<label class="target">${label !== undefined ? `<span>${escapeHtml(label)}</span>` : ''}` +
+    `<select name="${escapeHtml(fieldName)}" aria-label="${escapeHtml(ariaLabel)}">${optionsHtml}</select></label>`;
+}
+
+function fieldName(truelayerAccountId: string, budgetId: string): string {
+  return `map_${truelayerAccountId}__${budgetId}`;
+}
+
+/** One select per loaded budget, listing only that budget's accounts. */
+function renderLoadedTarget(
+  truelayerAccountId: string,
+  { budget, accounts }: BudgetAccounts,
+  current: string | undefined,
+  showLabel: boolean
+): string {
+  const known = current === undefined || accounts.some((a) => a.id === current);
+  const keepUnknown = !known
+    ? `<option value="${escapeHtml(current!)}" selected>${escapeHtml(current!)} (unavailable — account not loaded)</option>`
+    : '';
+  const blank = `<option value=""${current === undefined ? ' selected' : ''}>${current ? REMOVE : NOT_SYNCED}</option>`;
+  return targetLine(
+    fieldName(truelayerAccountId, budget.id),
+    showLabel ? budget.name : undefined,
+    budget.name,
+    blank + keepUnknown + accounts.map((a) => accountOption(a, current)).join('')
+  );
+}
+
+/** A mapping whose budget is not loaded (or no longer configured): keep or remove. */
+function renderUnavailableTarget(
+  truelayerAccountId: string,
+  budgetId: string,
+  current: string,
+  budgetName: string | undefined
+): string {
+  const label = budgetName ?? `Unknown budget ${budgetId}`;
+  const keepText = `${current} (unavailable — budget not loaded)`;
+  return targetLine(
+    fieldName(truelayerAccountId, budgetId),
+    label,
+    label,
+    `<option value="${escapeHtml(current)}" selected>${escapeHtml(keepText)}</option>` +
+      `<option value="">${REMOVE}</option>`
+  );
 }
 
 export interface PairingPageOptions {
@@ -228,37 +258,16 @@ export interface PairingPageOptions {
 }
 
 export function pairingPage(options: PairingPageOptions): string {
-  const budgetOptionsFor = (selectedId?: string): string => {
-    const selected = options.budgetAccounts.some((b) => b.budget.id === selectedId)
-      ? selectedId
-      : options.budgetAccounts[0]?.budget.id;
-    return options.budgetAccounts
-      .map(
-        (b) =>
-          `<option value="${escapeHtml(b.budget.id)}"${b.budget.id === selected ? ' selected' : ''}>` +
-          `${escapeHtml(b.budget.name)}</option>`
-      )
-      .join('');
-  };
-
+  const showLabel = options.budgetAccounts.length > 1;
   const rows = options.items
     .map((item) => {
       const kind = item.accountKind === 'card' ? 'card' : 'account';
-      const accountSelectId = `acct_${item.truelayerAccountId}`;
-      const budgetSelectName = `budget_${item.truelayerAccountId}`;
-      const mapSelectName = `map_${item.truelayerAccountId}`;
-
-      const accountOptions = renderAccountOptions(options.budgetAccounts);
-
+      const lines = options.budgetAccounts
+        .map((ba) => renderLoadedTarget(item.truelayerAccountId, ba, undefined, showLabel))
+        .join('');
       return `<tr>
         <td>${escapeHtml(item.name)}<div class="muted">${escapeHtml(item.currency)} &middot; ${escapeHtml(kind)}</div></td>
-        <td>
-          <select name="${escapeHtml(budgetSelectName)}" class="budget" data-target="${escapeHtml(accountSelectId)}">${budgetOptionsFor(item.budgetId)}</select>
-          <select name="${escapeHtml(mapSelectName)}" id="${escapeHtml(accountSelectId)}" class="account">
-            <option value="">— skip —</option>
-            ${accountOptions}
-          </select>
-        </td>
+        <td><div class="targets">${lines}</div></td>
       </tr>`;
     })
     .join('');
@@ -267,20 +276,17 @@ export function pairingPage(options: PairingPageOptions): string {
     ? '<p class="muted">No budgets configured yet — add one below.</p>'
     : '';
 
-  const script = `<script>${PAIRING_SCRIPT}</script>`;
-
   return layout(
     'Pair accounts',
     `     <h1>Pair ${escapeHtml(options.provider)} accounts</h1>
      ${options.warning ? `<div class="error">${escapeHtml(options.warning)}</div>` : ''}
      ${options.message ? `<div class="banner">${escapeHtml(options.message)}</div>` : ''}
-     <p>For each bank account, pick the Actual budget, then the matching account. Leave anything you do not want to import set to "skip".</p>
+     <p>Choose which Actual account each bank account should sync into in each budget. Leave anything you don't want to import as “not synced”.</p>
      ${noBudgets}
      <form method="post" action="/pair">
        <input type="hidden" name="pairingId" value="${escapeHtml(options.pairingId)}">
-       <noscript><p class="muted">JavaScript is off, so every account is listed. Each Actual account you choose must belong to the budget selected beside it, otherwise sync will fail for that account.</p></noscript>
        <table>
-         <thead><tr><th>TrueLayer</th><th>Budget &middot; Actual account</th></tr></thead>
+         <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>
        <div class="row"><button class="primary" type="submit">Save pairings</button></div>
@@ -294,8 +300,7 @@ export function pairingPage(options: PairingPageOptions): string {
          <input type="password" name="encryptionPassword" placeholder="Encryption password (optional)">
          <button class="primary" type="submit">Add budget</button>
        </div>
-     </form>
-     ${script}`
+     </form>`
   );
 }
 
@@ -304,18 +309,18 @@ export interface PairingRow {
   name: string;
   accountKind: 'account' | 'card';
   currency: string;
-  /** True when config.json already has a mapping for this account. */
-  mapped: boolean;
-  budgetId?: string;
-  actualAccountId?: string;
+  /** Current mappings: budget id -> Actual account id. Empty means unmapped. */
+  targets: Record<string, string>;
 }
 
 export interface EditPairingsPageOptions {
   connectionId: string;
   provider: string;
-  /** Every known TrueLayer account, merged with its current mapping if any. */
+  /** Every known TrueLayer account, merged with its current mappings if any. */
   rows: PairingRow[];
   budgetAccounts: BudgetAccounts[];
+  /** Every configured budget, loaded or not (to name budgets that failed to load). */
+  configuredBudgets?: { id: string; name: string }[];
   message?: string;
   /** Shown as an error banner, e.g. two budgets sharing one sync id. */
   warning?: string;
@@ -325,68 +330,32 @@ export interface EditPairingsPageOptions {
 
 /**
  * View and change a connection's account pairings without starting a new
- * TrueLayer authorization. Accounts fetched live are listed alongside any
- * saved-only mappings, and each row's dropdowns are pre-selected to the
- * current budget/Actual account.
+ * TrueLayer authorization. Each bank account gets one select per budget,
+ * pre-selected to its current target in that budget.
  */
 export function editPairingsPage(options: EditPairingsPageOptions): string {
+  const loadedIds = new Set(options.budgetAccounts.map((b) => b.budget.id));
+  const configuredName = new Map((options.configuredBudgets ?? []).map((b) => [b.id, b.name]));
+
   const rows = options.rows
     .map((row) => {
       const kind = row.accountKind === 'card' ? 'card' : 'account';
-      const accountSelectId = `acct_${row.truelayerAccountId}`;
-      const budgetSelectName = `budget_${row.truelayerAccountId}`;
-      const mapSelectName = `map_${row.truelayerAccountId}`;
-      const currentBudgetId = row.mapped ? row.budgetId : undefined;
-      const currentAccountId = row.mapped ? row.actualAccountId : undefined;
+      const unavailable = Object.entries(row.targets).filter(([budgetId]) => !loadedIds.has(budgetId));
+      const showLabel = options.budgetAccounts.length + unavailable.length > 1;
 
-      const budgetKnown =
-        currentBudgetId !== undefined &&
-        options.budgetAccounts.some((b) => b.budget.id === currentBudgetId);
-      const budgetOptions = [
-        !budgetKnown && currentBudgetId
-          ? `<option value="${escapeHtml(currentBudgetId)}" selected>` +
-            `${escapeHtml(currentBudgetId)} (unavailable — budget not loaded)</option>`
-          : '',
-        ...options.budgetAccounts.map(
-          (b) =>
-            `<option value="${escapeHtml(b.budget.id)}"${
-              b.budget.id === currentBudgetId ? ' selected' : ''
-            }>${escapeHtml(b.budget.name)}</option>`
-        ),
-      ].join('');
-
-      const accountKnown =
-        currentBudgetId !== undefined &&
-        currentAccountId !== undefined &&
-        options.budgetAccounts.some(
-          (b) => b.budget.id === currentBudgetId && b.accounts.some((a) => a.id === currentAccountId)
-        );
-      const keepUnknown =
-        !accountKnown && currentAccountId
-          ? `<option value="${escapeHtml(currentAccountId)}" data-budget="${escapeHtml(
-              currentBudgetId ?? ''
-            )}" selected>${escapeHtml(currentAccountId)} (unavailable — account not loaded)</option>`
-          : '';
-      const accountOptions = renderAccountOptions(
-        options.budgetAccounts,
-        currentBudgetId,
-        currentAccountId
-      );
-
-      const hidden = `<input type="hidden" name="name_${escapeHtml(row.truelayerAccountId)}" value="${escapeHtml(row.name)}">
-        <input type="hidden" name="currency_${escapeHtml(row.truelayerAccountId)}" value="${escapeHtml(row.currency)}">
-        <input type="hidden" name="kind_${escapeHtml(row.truelayerAccountId)}" value="${escapeHtml(kind)}">`;
+      const lines =
+        options.budgetAccounts
+          .map((ba) => renderLoadedTarget(row.truelayerAccountId, ba, row.targets[ba.budget.id], showLabel))
+          .join('') +
+        unavailable
+          .map(([budgetId, current]) =>
+            renderUnavailableTarget(row.truelayerAccountId, budgetId, current, configuredName.get(budgetId))
+          )
+          .join('');
 
       return `<tr>
-        <td>${escapeHtml(row.name)}<div class="muted">${escapeHtml(row.currency)} &middot; ${escapeHtml(kind)}</div>${hidden}</td>
-        <td>
-          <select name="${escapeHtml(budgetSelectName)}" class="budget" data-target="${escapeHtml(accountSelectId)}">${budgetOptions}</select>
-          <select name="${escapeHtml(mapSelectName)}" id="${escapeHtml(accountSelectId)}" class="account">
-            <option value="">${row.mapped ? '— remove mapping —' : '— do not sync —'}</option>
-            ${keepUnknown}
-            ${accountOptions}
-          </select>
-        </td>
+        <td>${escapeHtml(row.name)}<div class="muted">${escapeHtml(row.currency)} &middot; ${escapeHtml(kind)}</div></td>
+        <td><div class="targets">${lines}</div></td>
       </tr>`;
     })
     .join('');
@@ -408,14 +377,13 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
      ${
        options.rows.length > 0
          ? `<form method="post" action="/connections/${encodeURIComponent(options.connectionId)}/pairings">
-              <p>Pick the Actual budget and account each TrueLayer account should sync into, or leave it on "do not sync". Changes apply on the next sync.</p>
+              <p>Choose which Actual account each bank account should sync into in each budget. Leave anything you don't want to import as “not synced”, or choose “remove” to stop syncing it. Changes apply on the next sync.</p>
               <table>
-                <thead><tr><th>TrueLayer</th><th>Budget &middot; Actual account</th></tr></thead>
+                <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
               <div class="row"><button class="primary" type="submit">Save pairings</button></div>
-            </form>
-            <script>${PAIRING_SCRIPT}</script>`
+            </form>`
          : ''
      }
      <p><a href="/">Back to dashboard</a></p>`

@@ -8,10 +8,8 @@ import { once } from 'events';
 import axios from 'axios';
 import { createRequire } from 'module';
 import type { Express } from 'express';
-import { createHash } from 'crypto';
 import { setTokensPathForTests, saveConnection } from '../src/auth/tokens.js';
 import { setConfigPathForTests } from '../src/config.js';
-import { pairingPage, PAIRING_SCRIPT_CSP_SOURCE } from '../src/web/pages.js';
 
 // Point tokens.json at a temp dir before importing the server (paths are
 // resolved lazily on first use, same pattern as test/state.test.ts).
@@ -47,7 +45,7 @@ nodeRequire.cache[resolvedApiPath] = {
 process.env.ACTUAL_SERVER_URL ??= 'http://actual.invalid';
 process.env.ACTUAL_PASSWORD ??= 'secret';
 
-const { createApp, hostAllowed } = await import('../src/web/server.js');
+const { createApp, hostAllowed, parseTargetFields } = await import('../src/web/server.js');
 const { setPairing } = await import('../src/web/oauth.js');
 
 interface Res {
@@ -426,25 +424,44 @@ describe('Host allow-list (DNS-rebinding defence)', () => {
   });
 });
 
-describe('Content-Security-Policy script-src', () => {
-  it('allows exactly the pairing script hash on /pair/*', async () => {
-    const res = await request(app, '/pair/does-not-exist');
-    const csp = res.headers['content-security-policy'] ?? '';
-    assert.ok(csp.includes(`script-src ${PAIRING_SCRIPT_CSP_SOURCE};`), csp);
-    assert.match(csp, /default-src 'none'/);
+describe('Content-Security-Policy', () => {
+  it('has no script-src anywhere, including the pairing pages', async () => {
+    for (const path of ['/', '/pair/does-not-exist', '/connections/nope/pairings']) {
+      const res = await request(app, path);
+      const csp = res.headers['content-security-policy'] ?? '';
+      assert.doesNotMatch(csp, /script-src/, path);
+      assert.equal(
+        csp,
+        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
+      );
+    }
+  });
+});
+
+describe('parseTargetFields', () => {
+  it('splits map_<tl>__<budget> on the first __ and keeps blanks', () => {
+    const out = parseTargetFields({
+      map_tl1__b1: 'a1',
+      map_tl1__b2: '',
+      'map_tl_x__budget_abc': ' a3 ',
+      other: 'ignored',
+    });
+    assert.deepEqual([...out.keys()].sort(), ['tl1__b1', 'tl1__b2', 'tl_x__budget_abc']);
+    assert.deepEqual(out.get('tl1__b1'), { truelayerAccountId: 'tl1', budgetId: 'b1', actualAccountId: 'a1' });
+    assert.equal(out.get('tl1__b2')!.actualAccountId, '');
+    assert.equal(out.get('tl_x__budget_abc')!.actualAccountId, 'a3');
   });
 
-  it('has no script-src on the dashboard', async () => {
-    const res = await request(app, '/');
-    assert.doesNotMatch(res.headers['content-security-policy'] ?? '', /script-src/);
-  });
-
-  it('matches the hash of the inline script embedded in pairingPage output', () => {
-    const html = pairingPage({ pairingId: 'p1', provider: 'Bank', items: [], budgetAccounts: [] });
-    const match = html.match(/<script>([\s\S]*?)<\/script>/);
-    assert.ok(match, 'pairing page has an inline script');
-    const hash = createHash('sha256').update(match[1]).digest('base64');
-    assert.equal(PAIRING_SCRIPT_CSP_SOURCE, `'sha256-${hash}'`);
+  it('skips malformed keys', () => {
+    const out = parseTargetFields({
+      map_tl1: 'a1',
+      map___proto__: 'a1',
+      map_tl1__: 'a1',
+      map__b1: 'a1',
+      map_: 'a1',
+    });
+    assert.equal(out.size, 0);
+    assert.equal(parseTargetFields(undefined).size, 0);
   });
 });
 
@@ -678,20 +695,18 @@ describe('edit pairings routes', () => {
     fs.rmSync(configFile, { force: true });
   });
 
-  it('GET 404s for an unknown connection and carries the pairing-script CSP hash', async () => {
+  it('GET 404s for an unknown connection', async () => {
     assert.equal((await request(app, '/connections/nope/pairings')).status, 404);
-    const res = await request(app, '/connections/conn_edit/pairings');
-    assert.equal(res.status, 200);
-    assert.ok((res.headers['content-security-policy'] ?? '').includes(PAIRING_SCRIPT_CSP_SOURCE));
+    assert.equal((await request(app, '/connections/conn_edit/pairings')).status, 200);
   });
 
   it('GET lists live accounts and cards with the saved pairing preselected, and escapes names', async () => {
     const res = await request(app, '/connections/conn_edit/pairings');
-    assert.match(res.body, /name="map_tl1"/);
-    assert.match(res.body, /name="map_tl2"/);
-    assert.match(res.body, /name="map_tc1"/);
-    assert.match(res.body, /value="a1" data-budget="b1" selected/);
-    assert.match(res.body, /value="b1" selected/);
+    for (const n of ['tl1', 'tl2', 'tc1']) {
+      assert.match(res.body, new RegExp(`name="map_${n}__b1"`));
+      assert.match(res.body, new RegExp(`name="map_${n}__b2"`));
+    }
+    assert.match(res.body, /<option value="a1" selected>Main<\/option>/);
     assert.ok(res.body.includes('Savings &lt;b&gt;'));
     assert.equal(res.body.includes('Savings <b>'), false);
     assert.ok(res.body.includes('Edit &lt;Bank&gt;'));
@@ -704,7 +719,7 @@ describe('edit pairings routes', () => {
     assert.equal(res.status, 200);
     assert.match(res.body, /needs reconnecting/);
     assert.match(res.body, /Saved only/);
-    assert.doesNotMatch(res.body, /name="map_tc1"/);
+    assert.doesNotMatch(res.body, /name="map_tc1__/);
   });
 
   it('GET falls back to saved mappings when TrueLayer is unreachable', async () => {
@@ -712,15 +727,15 @@ describe('edit pairings routes', () => {
     const res = await request(app, '/connections/conn_edit/pairings');
     assert.equal(res.status, 200);
     assert.match(res.body, /Could not load accounts from TrueLayer/);
-    assert.match(res.body, /name="map_tl1"/);
-    assert.doesNotMatch(res.body, /name="map_tl2"/);
+    assert.match(res.body, /name="map_tl1__b1"/);
+    assert.doesNotMatch(res.body, /name="map_tl2__/);
   });
 
   it('GET works when config.json does not exist', async () => {
     fs.rmSync(configFile, { force: true });
     const res = await request(app, '/connections/conn_edit/pairings');
     assert.equal(res.status, 200);
-    assert.match(res.body, /— do not sync —/);
+    assert.match(res.body, /— not synced —/);
   });
 
   it('POST rejects a cross-site Origin and writes nothing', async () => {
@@ -728,31 +743,31 @@ describe('edit pairings routes', () => {
     const res = await request(app, '/connections/conn_edit/pairings', {
       method: 'POST',
       headers: { Origin: 'https://evil.example.com' },
-      body: form({ map_tl1: 'a2', budget_tl1: 'b1' }),
+      body: form({ map_tl1__b1: 'a2' }),
     });
     assert.equal(res.status, 403);
     assert.equal(fs.readFileSync(configFile, 'utf-8'), before);
   });
 
   it('POST 404s for an unknown connection', async () => {
-    assert.equal((await post('nope', { map_tl1: 'a1', budget_tl1: 'b1' })).status, 404);
+    assert.equal((await post('nope', { map_tl1__b1: 'a1' })).status, 404);
   });
 
   it('POST with unchanged selections is a no-op that keeps lastSyncedAt', async () => {
     const before = fs.readFileSync(configFile, 'utf-8');
-    const res = await post('conn_edit', { map_tl1: 'a1', budget_tl1: 'b1', map_tl2: '', budget_tl2: 'b1' });
+    const res = await post('conn_edit', { map_tl1__b1: 'a1', map_tl2__b1: '' });
     assert.equal(res.status, 302);
     assert.match(res.headers.location ?? '', /\/connections\/conn_edit\/pairings\?msg=Updated%200%20pairing/);
     assert.equal(fs.readFileSync(configFile, 'utf-8'), before);
   });
 
-  it('POST re-points a mapping to another budget/account, leaving other connections alone', async () => {
-    const res = await post('conn_edit', { map_tl1: 'c1', budget_tl1: 'b2' });
+  it('POST re-points a mapping to another account in the same budget, leaving other connections alone', async () => {
+    const res = await post('conn_edit', { map_tl1__b1: 'a2' });
     assert.equal(res.status, 302);
     const accounts = readAccounts();
     const mine = accounts.find((a) => a.connectionId === 'conn_edit')!;
-    assert.equal(mine.actualAccountId, 'c1');
-    assert.equal(mine.budgetId, 'b2');
+    assert.equal(mine.actualAccountId, 'a2');
+    assert.equal(mine.budgetId, 'b1');
     assert.equal(mine.lastSyncedAt, '2026-01-01T00:00:00.000Z');
     const other = accounts.find((a) => a.connectionId === 'conn_other')!;
     assert.equal(other.actualAccountId, 'a2');
@@ -760,32 +775,30 @@ describe('edit pairings routes', () => {
   });
 
   it('POST removes a mapping when the account is blank, only on the edited connection', async () => {
-    const res = await post('conn_edit', { map_tl1: '', budget_tl1: 'b1' });
+    const res = await post('conn_edit', { map_tl1__b1: '' });
     assert.equal(res.status, 302);
     assert.match(res.headers.location ?? '', /removed%201/);
-    const accounts = readAccounts();
-    assert.deepEqual(accounts.map((a) => a.connectionId), ['conn_other']);
+    assert.deepEqual(readAccounts().map((a) => a.connectionId), ['conn_other']);
   });
 
   it('POST cannot touch another connection by posting its account id', async () => {
     // conn_other also maps tl1; editing conn_edit must not change that one.
-    await post('conn_edit', { map_tl1: '' });
+    await post('conn_edit', { map_tl1__b1: '' });
     assert.equal(readAccounts().filter((a) => a.connectionId === 'conn_other').length, 1);
-    await post('conn_lapsed', { map_tl1: '', map_tl2: 'a1', budget_tl2: 'b1' });
+    await post('conn_lapsed', { map_tl1__b1: '', map_tl2__b1: 'a1' });
     assert.equal(readAccounts().filter((a) => a.connectionId === 'conn_other').length, 1);
   });
 
   it('POST pairs a previously skipped account using TrueLayer data, not form fields', async () => {
     const res = await post('conn_edit', {
-      map_tl1: 'a1',
-      budget_tl1: 'b1',
-      map_tc1: 'a2',
-      budget_tc1: 'b1',
+      map_tl1__b1: 'a1',
+      map_tc1__b1: 'a2',
       name_tc1: 'FORGED',
       kind_tc1: 'account',
       currency_tc1: 'USD',
     });
     assert.equal(res.status, 302);
+    assert.match(res.headers.location ?? '', /added%201/);
     const added = readAccounts().find((a) => a.truelayerAccountId === 'tc1')!;
     assert.equal(added.connectionId, 'conn_edit');
     assert.equal(added.name, 'Visa');
@@ -794,30 +807,60 @@ describe('edit pairings routes', () => {
     assert.equal(added.actualAccountId, 'a2');
   });
 
+  it('POST adds a second budget target for an existing account without calling TrueLayer', async () => {
+    truelayerDown = true; // a live fetch would fail, so the add must not need one
+    const res = await post('conn_edit', { map_tl1__b1: 'a1', map_tl1__b2: 'c1' });
+    assert.equal(res.status, 302);
+    assert.match(res.headers.location ?? '', /Updated%201%20pairing.*added%201/);
+    const mine = readAccounts().filter((a) => a.connectionId === 'conn_edit');
+    assert.equal(mine.length, 2);
+    const second = mine.find((a) => a.budgetId === 'b2')!;
+    assert.equal(second.truelayerAccountId, 'tl1');
+    assert.equal(second.actualAccountId, 'c1');
+    assert.equal(second.name, 'Current');
+    assert.equal(second.lastSyncedAt, undefined);
+    assert.equal(mine.find((a) => a.budgetId === 'b1')!.lastSyncedAt, '2026-01-01T00:00:00.000Z');
+  });
+
+  it('POST removing one target keeps the other', async () => {
+    writeConfig([acct({}), acct({ budgetId: 'b2', actualAccountId: 'c1' })]);
+    const res = await post('conn_edit', { map_tl1__b2: '' });
+    assert.equal(res.status, 302);
+    const mine = readAccounts();
+    assert.equal(mine.length, 1);
+    assert.equal(mine[0].budgetId, 'b1');
+  });
+
+  it('POST leaves a mapping untouched when its field is missing', async () => {
+    writeConfig([acct({}), acct({ budgetId: 'b2', actualAccountId: 'c1' })]);
+    const before = fs.readFileSync(configFile, 'utf-8');
+    const res = await post('conn_edit', { map_tl1__b1: 'a1' });
+    assert.equal(res.status, 302);
+    assert.equal(fs.readFileSync(configFile, 'utf-8'), before);
+  });
+
   it('POST ignores accounts TrueLayer does not report and unknown budgets', async () => {
     const res = await post('conn_edit', {
-      map_ghost: 'a1',
-      budget_ghost: 'b1',
-      map_tl1: 'a2',
-      budget_tl1: 'no_such_budget',
+      map_ghost__b1: 'a1',
+      map_tl1__no_such_budget: 'a2',
     });
     assert.equal(res.status, 302);
     assert.match(res.headers.location ?? '', /ignored%202/);
     const accounts = readAccounts();
     assert.equal(accounts.some((a) => a.truelayerAccountId === 'ghost'), false);
-    assert.equal(accounts.find((a) => a.connectionId === 'conn_edit')!.actualAccountId, 'a1');
+    assert.equal(accounts.filter((a) => a.connectionId === 'conn_edit').length, 1);
   });
 
   it('POST cannot add skipped accounts when TrueLayer is unreachable, but can still remove', async () => {
     truelayerDown = true;
-    await post('conn_edit', { map_tl2: 'a1', budget_tl2: 'b1', map_tl1: '' });
+    await post('conn_edit', { map_tl2__b1: 'a1', map_tl1__b1: '' });
     const accounts = readAccounts();
     assert.equal(accounts.some((a) => a.truelayerAccountId === 'tl2'), false);
     assert.equal(accounts.some((a) => a.connectionId === 'conn_edit'), false);
   });
 
   it('POST survives hostile prototype-ish account ids', async () => {
-    const res = await post('conn_edit', { 'map___proto__': 'a1', budget___proto__: 'b1', map_constructor: '' });
+    const res = await post('conn_edit', { 'map___proto____b1': 'a1', map_constructor__b1: '' });
     assert.equal(res.status, 302);
     assert.equal(readAccounts().length, 2);
   });
@@ -828,8 +871,8 @@ describe('edit pairings routes', () => {
       acct({ connectionId: 'conn_other', truelayerAccountId: 'tl9', actualAccountId: 'a2' }),
     ]);
     await Promise.all([
-      post('conn_edit', { map_tl1: 'a2', budget_tl1: 'b1' }),
-      post('conn_other', { map_tl9: 'a1', budget_tl9: 'b1' }),
+      post('conn_edit', { map_tl1__b1: 'a2' }),
+      post('conn_other', { map_tl9__b1: 'a1' }),
     ]);
     const accounts = readAccounts();
     assert.equal(accounts.find((a) => a.connectionId === 'conn_edit')!.actualAccountId, 'a2');

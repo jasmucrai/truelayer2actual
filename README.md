@@ -188,9 +188,9 @@ optionally, an E2E encryption password) differs per budget.
 - **CLI setup** (`npm run setup`): you are prompted to add budgets (name + sync id + optional
   encryption password), then for each bank account/card you choose *which budget* before pairing
   *which account* - so a single bank connection can span multiple budgets.
-- **Dashboard** (`npm run serve`): after authorising a bank, each account row has its own budget
-  selector next to the account selector. You can also add budgets directly from the pairing page
-  (including an optional encryption password).
+- **Dashboard** (`npm run serve`): after authorising a bank, each account row has one selector per
+  budget, listing only that budget's accounts. You can also add budgets directly from the pairing
+  page (including an optional encryption password).
 
 `ACTUAL_SYNC_ID` remains as a convenience: it defines the "Default" budget used when no other
 budgets have been configured yet (and for backwards compatibility with older configs).
@@ -198,6 +198,16 @@ budgets have been configured yet (and for backwards compatibility with older con
 Every budget needs its own sync id (Actual -> Settings -> Advanced, with that budget open). Two
 budgets with the same sync id are the same Actual file and list identical accounts, so setup and
 the dashboard refuse to add one, and the pairing page flags any existing clash in `config.json`.
+
+#### Syncing one bank account into several budgets
+
+A bank account can sync into more than one budget (for example a shared current account that
+appears in both a personal and a joint budget). On the pairing page (and under **Edit pairings**
+on the dashboard), pick an Actual account under each budget you want it in and leave the others
+as "not synced". Each bank account has at most one target per budget. Transactions are fetched
+from TrueLayer once per run per bank account and imported into every budget it is mapped to.
+Each target keeps its own last-sync time, and the dashboard flags any that have fallen behind.
+In the CLI, you are asked after each pairing whether to also sync it into another budget.
 
 ### 5. Sync
 

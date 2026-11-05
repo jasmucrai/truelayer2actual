@@ -18,6 +18,8 @@ import {
   budgetFromEnv,
   applyPairingChanges,
   reauthWarnDays,
+  syncIntervalHours,
+  mappingKey,
   removeAccountsForConnection,
   listBudgets,
   addBudget,
@@ -46,9 +48,9 @@ import {
   dashboardPage,
   pairingPage,
   editPairingsPage,
-  PAIRING_SCRIPT_CSP_SOURCE,
   messagePage,
   confirmDeletePage,
+  formatDate,
   type BudgetAccounts,
   type ConnectionStatus,
   type ConnectionView,
@@ -69,10 +71,43 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+export interface TargetField {
+  truelayerAccountId: string;
+  budgetId: string;
+  actualAccountId: string;
+}
+
+/**
+ * Parse `map_<truelayerAccountId>__<budgetId>` form fields. The key is split on
+ * the FIRST `__`, so budget ids may not contain it (generated ids never do);
+ * malformed keys are skipped. Blank values are kept: they mean "not synced".
+ */
+export function parseTargetFields(body: Record<string, unknown> | undefined): Map<string, TargetField> {
+  const out = new Map<string, TargetField>();
+  for (const key of Object.keys(body ?? {})) {
+    if (!key.startsWith('map_')) continue;
+    const rest = key.slice('map_'.length);
+    const idx = rest.indexOf('__');
+    if (idx <= 0 || idx + 2 >= rest.length) continue;
+    const truelayerAccountId = rest.slice(0, idx);
+    const budgetId = rest.slice(idx + 2);
+    const raw = (body as Record<string, unknown>)[key];
+    out.set(mappingKey({ truelayerAccountId, budgetId }), {
+      truelayerAccountId,
+      budgetId,
+      actualAccountId: typeof raw === 'string' ? raw.trim() : '',
+    });
+  }
+  return out;
+}
+
 async function buildConnectionViews(): Promise<ConnectionView[]> {
   const connections = loadAllConnections();
 
-  const accounts = (await loadConfigIfExists())?.accounts ?? [];
+  const config = await loadConfigIfExists();
+  const accounts = config?.accounts ?? [];
+  const budgetName = new Map((config?.budgets ?? []).map((b) => [b.id, b.name]));
+  const staleMs = 2 * syncIntervalHours() * 3_600_000;
 
   return Object.entries(connections).map(([id, tokens]) => {
     const mine = accounts.filter((a) => a.connectionId === id);
@@ -92,10 +127,36 @@ async function buildConnectionViews(): Promise<ConnectionView[]> {
     if (tokens.needsReauth) status = 'reauth_needed';
     else if (daysLeft !== undefined && daysLeft <= reauthWarnDays()) status = 'expiring';
 
+    const byBank = new Map<string, Account[]>();
+    for (const a of mine) {
+      const list = byBank.get(a.truelayerAccountId) ?? [];
+      list.push(a);
+      byBank.set(a.truelayerAccountId, list);
+    }
+    const nameOf = (a: Account): string => budgetName.get(a.budgetId) ?? a.budgetId;
+    const pairings = [...byBank.values()].map((list) => ({
+      label: `${list[0].name} → ${list.map(nameOf).join(', ')}`,
+    }));
+    const now = Date.now();
+    const staleTargets = mine
+      .filter((a) => {
+        const t = a.lastSyncedAt ? Date.parse(a.lastSyncedAt) : NaN;
+        return !Number.isFinite(t) || now - t > staleMs;
+      })
+      .map((a) => {
+        const when = a.lastSyncedAt
+          ? `last synced ${formatDate(a.lastSyncedAt)}`
+          : 'not synced yet';
+        return `${nameOf(a)} · ${a.name} ${when}`;
+      });
+
     return {
       id,
       provider: tokens.providerDisplayName ?? tokens.providerId ?? id,
-      accountCount: mine.length,
+      accountCount: byBank.size,
+      pairingCount: mine.length,
+      pairings,
+      staleTargets,
       lastSyncedAt,
       consentExpiresAt: tokens.consentExpiresAt,
       daysLeft,
@@ -236,7 +297,15 @@ async function loadPairingRows(
   connectionId: string,
   savedAccounts: Account[]
 ): Promise<{ rows: PairingRow[]; note?: string }> {
-  const savedByTlId = new Map(savedAccounts.map((a) => [a.truelayerAccountId, a]));
+  const savedByTlId = new Map<string, Account[]>();
+  for (const a of savedAccounts) {
+    const list = savedByTlId.get(a.truelayerAccountId) ?? [];
+    list.push(a);
+    savedByTlId.set(a.truelayerAccountId, list);
+  }
+  const targetsOf = (tlId: string): Record<string, string> =>
+    Object.fromEntries((savedByTlId.get(tlId) ?? []).map((a) => [a.budgetId, a.actualAccountId]));
+
   const live = await fetchLivePairingItems(connectionId);
   const items = live.items ?? [];
   const note = live.note;
@@ -245,24 +314,16 @@ async function loadPairingRows(
   const seen = new Set<string>();
   for (const item of items) {
     seen.add(item.truelayerAccountId);
-    const saved = savedByTlId.get(item.truelayerAccountId);
-    rows.push({
-      ...item,
-      mapped: Boolean(saved),
-      budgetId: saved?.budgetId,
-      actualAccountId: saved?.actualAccountId,
-    });
+    rows.push({ ...item, targets: targetsOf(item.truelayerAccountId) });
   }
-  for (const saved of savedAccounts) {
-    if (seen.has(saved.truelayerAccountId)) continue;
+  for (const [tlId, saved] of savedByTlId) {
+    if (seen.has(tlId)) continue;
     rows.push({
-      truelayerAccountId: saved.truelayerAccountId,
-      name: saved.name,
-      accountKind: saved.accountKind,
-      currency: saved.currency,
-      mapped: true,
-      budgetId: saved.budgetId,
-      actualAccountId: saved.actualAccountId,
+      truelayerAccountId: tlId,
+      name: saved[0].name,
+      accountKind: saved[0].accountKind,
+      currency: saved[0].currency,
+      targets: targetsOf(tlId),
     });
   }
 
@@ -334,13 +395,9 @@ export function createApp(): Express {
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('Cache-Control', 'no-store');
     if (!req.path.startsWith('/healthz')) {
-      // The pairing page alone ships one inline script (budget -> account
-      // filter), allowed by hash; every other page stays script-free.
-      const scriptSrc = req.path.startsWith('/pair/') || /^\/connections\/[^/]+\/pairings$/.test(req.path)
-        ? `script-src ${PAIRING_SCRIPT_CSP_SOURCE}; ` : '';
       res.setHeader(
         'Content-Security-Policy',
-        `default-src 'none'; ${scriptSrc}style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'`
+        `default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'`
       );
     }
     next();
@@ -568,6 +625,7 @@ export function createApp(): Express {
           provider: connection.providerDisplayName ?? connection.providerId ?? connectionId,
           rows: pairing.rows,
           budgetAccounts,
+          configuredBudgets: budgets.map((b) => ({ id: b.id, name: b.name })),
           note: pairing.note,
           message: asString(req.query.msg),
           warning:
@@ -588,42 +646,34 @@ export function createApp(): Express {
         return;
       }
 
-      // Parse the submitted rows once. Only `map_<tlId>` keys count; everything
-      // else (names, currencies) is advisory and never trusted for new rows.
-      const body: Record<string, unknown> = req.body ?? {};
-      const submitted = new Map<string, { actualAccountId: string; budgetId?: string }>();
-      for (const key of Object.keys(body)) {
-        if (!key.startsWith('map_')) continue;
-        const truelayerAccountId = key.slice('map_'.length);
-        submitted.set(truelayerAccountId, {
-          actualAccountId: asString(body[key]) ?? '',
-          budgetId: asString(body[`budget_${truelayerAccountId}`]),
-        });
-      }
+      // Only `map_<tlId>__<budgetId>` keys count; a field that is absent
+      // leaves that mapping untouched.
+      const submitted = parseTargetFields(req.body);
 
-      // Pairing a previously skipped account needs TrueLayer to vouch for it.
-      // Fetch outside the state lock: the token refresh takes that lock itself.
+      // Pairing a bank account with no mapping yet needs TrueLayer to vouch for
+      // it. Fetch outside the state lock: the token refresh takes that lock itself.
       let liveById: Map<string, PairingItem> | undefined;
-      let existingIds = new Set<string>();
+      let existingKeys = new Set<string>();
+      let existingBankIds = new Set<string>();
       try {
         const current = await loadConfigIfExists();
-        existingIds = new Set(
-          (current?.accounts ?? [])
-            .filter((a) => a.connectionId === connectionId)
-            .map((a) => a.truelayerAccountId)
-        );
+        const mine = (current?.accounts ?? []).filter((a) => a.connectionId === connectionId);
+        existingKeys = new Set(mine.map(mappingKey));
+        existingBankIds = new Set(mine.map((a) => a.truelayerAccountId));
       } catch {
         // A corrupt config is reported by the locked write below.
       }
-      const wantsNew = [...submitted].some(
-        ([id, row]) => row.actualAccountId && !existingIds.has(id)
+      const wantsNewBank = [...submitted].some(
+        ([key, row]) =>
+          row.actualAccountId && !existingKeys.has(key) && !existingBankIds.has(row.truelayerAccountId)
       );
-      if (wantsNew) {
+      if (wantsNewBank) {
         const live = await fetchLivePairingItems(connectionId);
         if (live.items) liveById = new Map(live.items.map((i) => [i.truelayerAccountId, i]));
       }
 
       let changed = 0;
+      let added = 0;
       let removed = 0;
       let ignored = 0;
       try {
@@ -639,66 +689,65 @@ export function createApp(): Express {
           };
           const budgetIds = new Set(config.budgets.map((b) => b.id));
 
-          const existingByTlId = new Map(
-            config.accounts
-              .filter((a) => a.connectionId === connectionId)
-              .map((a) => [a.truelayerAccountId, a])
-          );
+          const mine = config.accounts.filter((a) => a.connectionId === connectionId);
+          const existingByKey = new Map(mine.map((a) => [mappingKey(a), a]));
+          const siblingByTlId = new Map<string, Account>();
+          for (const a of mine) if (!siblingByTlId.has(a.truelayerAccountId)) siblingByTlId.set(a.truelayerAccountId, a);
+
           const changes: Record<string, PairingChange> = Object.create(null);
-          const added: Account[] = [];
+          const newAccounts: Account[] = [];
 
-          for (const [truelayerAccountId, row] of submitted) {
-            const existing = existingByTlId.get(truelayerAccountId);
+          for (const [key, row] of submitted) {
+            const existing = existingByKey.get(key);
 
-            if (!row.actualAccountId) {
-              // Blank means "do not sync": drop an existing mapping, ignore a new row.
-              if (existing) {
-                changes[truelayerAccountId] = { budgetId: existing.budgetId, actualAccountId: '' };
+            if (existing) {
+              // Blank removes; a different target changes; the same is a no-op.
+              if (row.actualAccountId !== existing.actualAccountId) {
+                if (row.actualAccountId && !budgetIds.has(row.budgetId)) {
+                  ignored++;
+                  continue;
+                }
+                changes[key] = { actualAccountId: row.actualAccountId };
               }
               continue;
             }
 
-            if (!row.budgetId) continue;
-            const unchanged =
-              existing?.budgetId === row.budgetId &&
-              existing.actualAccountId === row.actualAccountId;
-            if (!unchanged && !budgetIds.has(row.budgetId)) {
+            // Blank on a mapping that does not exist: nothing to do.
+            if (!row.actualAccountId) continue;
+
+            if (!budgetIds.has(row.budgetId)) {
               ignored++;
               continue;
             }
 
-            if (existing) {
-              changes[truelayerAccountId] = {
-                budgetId: row.budgetId,
-                actualAccountId: row.actualAccountId,
-              };
-              continue;
-            }
-
-            const item = liveById?.get(truelayerAccountId);
+            // A bank account already mapped elsewhere on this connection is
+            // known-good: reuse its details without a live TrueLayer check.
+            const sibling = siblingByTlId.get(row.truelayerAccountId);
+            const item = sibling ?? liveById?.get(row.truelayerAccountId);
             if (!item) {
               ignored++;
               continue;
             }
-            added.push({
+            newAccounts.push({
               name: item.name,
               connectionId,
               budgetId: row.budgetId,
               accountKind: item.accountKind,
-              truelayerAccountId,
+              truelayerAccountId: row.truelayerAccountId,
               actualAccountId: row.actualAccountId,
               currency: item.currency,
             });
           }
 
           const result = applyPairingChanges(config.accounts, connectionId, changes);
-          changed = result.changed + added.length;
+          changed = result.changed;
+          added = newAccounts.length;
           removed = result.removed;
-          if (changed === 0 && removed === 0) return;
+          if (changed === 0 && added === 0 && removed === 0) return;
 
           await saveConfig({
             ...config,
-            accounts: [...result.accounts, ...added],
+            accounts: [...result.accounts, ...newAccounts],
           });
         });
       } catch (err) {
@@ -708,7 +757,8 @@ export function createApp(): Express {
         return;
       }
 
-      const parts = [`Updated ${changed} pairing(s)`];
+      const parts = [`Updated ${changed + added} pairing(s)`];
+      if (added > 0) parts.push(`added ${added}`);
       if (removed > 0) parts.push(`removed ${removed}`);
       if (ignored > 0) parts.push(`ignored ${ignored} invalid selection(s)`);
       res.redirect(
@@ -776,13 +826,14 @@ export function createApp(): Express {
         return;
       }
 
-      const selections: Record<string, PairingSelection> = {};
-      for (const item of session.items) {
-        const budgetId = asString(req.body?.[`budget_${item.truelayerAccountId}`]);
-        const actualAccountId = asString(req.body?.[`map_${item.truelayerAccountId}`]);
-        if (budgetId && actualAccountId) {
-          selections[item.truelayerAccountId] = { budgetId, actualAccountId };
-        }
+      const selections: Record<string, PairingSelection[]> = {};
+      const sessionIds = new Set(session.items.map((i) => i.truelayerAccountId));
+      for (const field of parseTargetFields(req.body).values()) {
+        if (!field.actualAccountId || !sessionIds.has(field.truelayerAccountId)) continue;
+        (selections[field.truelayerAccountId] ??= []).push({
+          budgetId: field.budgetId,
+          actualAccountId: field.actualAccountId,
+        });
       }
 
       const { saved } = await savePairings(pairingId, selections);
@@ -795,9 +846,13 @@ export function createApp(): Express {
     asyncHandler(async (_req, res) => {
       try {
         const summary = await runSync();
-        const message =
-          `Sync finished: ${summary.synced.length} synced, ` +
+        let message =
+          `Sync finished: ${summary.synced.length} pairing(s) synced, ` +
           `${summary.skipped.length} need re-auth, ${summary.errors.length} error(s).`;
+        if (summary.errors.length > 0) {
+          const labels = summary.errors.map((e) => e.account ?? e.connectionId ?? 'unknown');
+          message += ` Failed: ${labels.slice(0, 5).join(', ')}${labels.length > 5 ? ', …' : ''}`;
+        }
         res.redirect('/?msg=' + encodeURIComponent(message));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

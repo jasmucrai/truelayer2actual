@@ -8,8 +8,6 @@ import {
   messagePage,
 } from '../src/web/pages.js';
 import type { BudgetAccounts } from '../src/web/pages.js';
-import { createHash } from 'crypto';
-import { PAIRING_SCRIPT_CSP_SOURCE } from '../src/web/pages.js';
 import { describeErrorBody } from '../src/util/http.js';
 import { reauthWarnDays } from '../src/config.js';
 
@@ -68,6 +66,50 @@ describe('dashboardPage', () => {
   });
 });
 
+describe('dashboardPage pairings', () => {
+  const conn = {
+    id: 'conn_1',
+    provider: 'Monzo',
+    accountCount: 2,
+    status: 'healthy' as const,
+  };
+
+  it('shows a plain count when every bank account has one target', () => {
+    const html = dashboardPage({ connections: [{ ...conn, pairingCount: 2 }] });
+    assert.match(html, /Accounts mapped: 2 &middot;/);
+    assert.doesNotMatch(html, /\d targets/);
+  });
+
+  it('shows accounts -> targets when some are synced to several budgets', () => {
+    const html = dashboardPage({
+      connections: [
+        {
+          ...conn,
+          pairingCount: 3,
+          pairings: [{ label: 'Current Account → Personal, Joint' }, { label: 'Card → Personal' }],
+        },
+      ],
+    });
+    assert.match(html, /Accounts mapped: 2 &rarr; 3 targets/);
+    assert.ok(html.includes('Current Account → Personal, Joint'));
+  });
+
+  it('renders escaped stale-target warnings', () => {
+    const html = dashboardPage({
+      connections: [
+        {
+          ...conn,
+          pairingCount: 2,
+          staleTargets: ['Joint · Current <b>Account</b> not synced yet'],
+        },
+      ],
+    });
+    assert.ok(html.includes('class="stale"'));
+    assert.ok(html.includes('not synced yet'));
+    assert.equal(html.includes('<b>Account'), false);
+  });
+});
+
 describe('pairingPage', () => {
   it('escapes the warning, message, provider and account fields', () => {
     const html = pairingPage({
@@ -115,21 +157,42 @@ describe('pairingPage budgets', () => {
   ];
   const base = { pairingId: 'p1', provider: 'Monzo', items, budgetAccounts };
 
-  it('renders a budget selector per bank account with every budget, default first', () => {
+  it('renders one select per budget per bank account, named map_<tl>__<budget>', () => {
     const html = pairingPage(base);
-    assert.equal((html.match(/<select name="budget_tl\d" class="budget"/g) ?? []).length, 2);
-    assert.ok(html.includes('name="budget_tl1"'));
-    assert.ok(html.includes('data-target="acct_tl1"'));
-    const first = html.indexOf('<option value="default" selected>Default</option>');
-    const second = html.indexOf('<option value="budget_2">Joint &lt;b&gt;</option>');
-    assert.ok(first !== -1 && second > first, 'default budget option listed first');
+    for (const name of ['map_tl1__default', 'map_tl1__budget_2', 'map_tl2__default', 'map_tl2__budget_2']) {
+      assert.ok(html.includes(`<select name="${name}"`), name);
+    }
+    assert.equal((html.match(/<select /g) ?? []).length, 4);
+    assert.ok(html.includes('— not synced —'));
     assert.equal(html.includes('Joint <b>'), false);
   });
 
-  it('tags each Actual account option with its budget and labels off-budget accounts', () => {
+  it('lists only that budget\'s accounts in each select and labels off-budget accounts', () => {
     const html = pairingPage(base);
-    assert.ok(html.includes('value="a1" data-budget="default">Default / Main</option>'));
-    assert.ok(html.includes('data-budget="budget_2">Joint &lt;b&gt; / Shared (off-budget)</option>'));
+    const sel = (name: string) => html.slice(html.indexOf(`name="${name}"`)).split('</select>')[0];
+    assert.ok(sel('map_tl1__default').includes('>Main</option>'));
+    assert.equal(sel('map_tl1__default').includes('Shared'), false);
+    assert.ok(sel('map_tl1__budget_2').includes('Shared (off-budget)'));
+    assert.equal(sel('map_tl1__budget_2').includes('Main'), false);
+    assert.ok(html.includes('<span>Joint &lt;b&gt;</span>'));
+  });
+
+  it('hides the budget label when only one budget is shown', () => {
+    const html = pairingPage({ ...base, budgetAccounts: [budgetAccounts[0]] });
+    assert.equal((html.match(/<select /g) ?? []).length, 2);
+    assert.equal(html.includes('<span>Default</span>'), false);
+  });
+
+  it('has no script or noscript on either page', () => {
+    const edit = editPairingsPage({
+      connectionId: 'c',
+      provider: 'M',
+      budgetAccounts,
+      rows: [{ truelayerAccountId: 'tl1', name: 'X', accountKind: 'account', currency: 'GBP', targets: {} }],
+    });
+    for (const html of [pairingPage(base), edit]) {
+      assert.equal(/<script|<noscript/i.test(html), false);
+    }
   });
 
   it('always renders the add-budget form, carrying the pairing id', () => {
@@ -211,37 +274,6 @@ describe('reauthWarnDays', () => {
   });
 });
 
-describe('pairingPage budget selection', () => {
-  const budgetAccounts = [
-    { budget: { id: 'b1', name: 'First', syncId: 's1' }, accounts: [] },
-    { budget: { id: 'b"2', name: 'Second', syncId: 's2' }, accounts: [] },
-  ];
-  const base = { truelayerAccountId: 'tl1', name: 'Current', accountKind: 'account' as const, currency: 'GBP' };
-
-  it('selects the first (default) budget when unpaired', () => {
-    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [base], budgetAccounts });
-    assert.ok(html.includes('<option value="b1" selected>First</option>'));
-    assert.equal(html.includes('selected>Second'), false);
-  });
-
-  it('selects the existing budget, escaped', () => {
-    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [{ ...base, budgetId: 'b"2' }], budgetAccounts });
-    assert.ok(html.includes('<option value="b&quot;2" selected>Second</option>'));
-    assert.equal(html.includes('value="b1" selected'), false);
-  });
-
-  it('falls back to the default when the existing budget is unknown', () => {
-    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [{ ...base, budgetId: 'gone' }], budgetAccounts });
-    assert.ok(html.includes('value="b1" selected'));
-  });
-
-  it('warns without JavaScript that accounts must match the budget', () => {
-    const html = pairingPage({ pairingId: 'p', provider: 'X', items: [base], budgetAccounts });
-    assert.match(html, /<noscript>[^]*must belong to the budget selected/);
-  });
-});
-
-
 const editBudgetAccounts: BudgetAccounts[] = [
   {
     budget: { id: 'b1', name: 'Personal', syncId: 's1' },
@@ -253,161 +285,93 @@ const editBudgetAccounts: BudgetAccounts[] = [
   },
 ];
 
-describe('editPairingsPage', () => {
-  it('pre-selects the saved budget and account', () => {
-    const html = editPairingsPage({
-      connectionId: 'conn_1',
-      provider: 'Monzo',
-      rows: [
-        {
-          truelayerAccountId: 'tl1',
-          name: 'Bank',
-          accountKind: 'account',
-          currency: 'GBP',
-          mapped: true,
-          budgetId: 'b2',
-          actualAccountId: 'a2',
-        },
-      ],
-      budgetAccounts: editBudgetAccounts,
-    });
-
-    assert.match(html, /value="b2" selected/);
-    assert.match(html, /value="a2" data-budget="b2" selected/);
-    assert.match(html, /— remove mapping —/);
-  });
-
-  it('offers "do not sync" for an unmapped account', () => {
-    const html = editPairingsPage({
-      connectionId: 'conn_1',
-      provider: 'Monzo',
-      rows: [
-        {
-          truelayerAccountId: 'tl2',
-          name: 'Savings',
-          accountKind: 'account',
-          currency: 'GBP',
-          mapped: false,
-        },
-      ],
-      budgetAccounts: editBudgetAccounts,
-    });
-
-    assert.match(html, /— do not sync —/);
-    assert.doesNotMatch(html, /— remove mapping —/);
-  });
-
-  it('keeps an unavailable mapping selected instead of silently dropping it', () => {
-    const html = editPairingsPage({
-      connectionId: 'conn_1',
-      provider: 'Monzo',
-      rows: [
-        {
-          truelayerAccountId: 'tl1',
-          name: 'Bank',
-          accountKind: 'account',
-          currency: 'GBP',
-          mapped: true,
-          budgetId: 'b9',
-          actualAccountId: 'a9',
-        },
-      ],
-      budgetAccounts: editBudgetAccounts,
-    });
-
-    assert.match(html, /value="b9" selected/);
-    assert.match(html, /value="a9" data-budget="b9" selected/);
-    assert.match(html, /unavailable/);
-  });
-
-  it('carries the TrueLayer name/kind/currency so a new pairing can be saved', () => {
-    const html = editPairingsPage({
-      connectionId: 'conn_1',
-      provider: 'Monzo',
-      rows: [
-        {
-          truelayerAccountId: 'tl3',
-          name: 'Credit Card',
-          accountKind: 'card',
-          currency: 'GBP',
-          mapped: false,
-        },
-      ],
-      budgetAccounts: editBudgetAccounts,
-    });
-
-    assert.match(html, /name="name_tl3" value="Credit Card"/);
-    assert.match(html, /name="kind_tl3" value="card"/);
-    assert.match(html, /name="currency_tl3" value="GBP"/);
-  });
+const editRow = (targets: Record<string, string>, over: Record<string, unknown> = {}) => ({
+  truelayerAccountId: 'tl1',
+  name: 'Bank',
+  accountKind: 'account' as const,
+  currency: 'GBP',
+  targets,
+  ...over,
 });
+const editBase = { connectionId: 'conn_1', provider: 'Monzo', budgetAccounts: editBudgetAccounts };
 
-describe('editPairingsPage rendering', () => {
-  const row = (over: Record<string, unknown> = {}) => ({
-    truelayerAccountId: 'tl1',
-    name: 'Bank',
-    accountKind: 'account' as const,
-    currency: 'GBP',
-    mapped: true,
-    budgetId: 'b1',
-    actualAccountId: 'a1',
-    ...over,
+describe('editPairingsPage', () => {
+  it('pre-selects the saved account in each budget and offers remove only where mapped', () => {
+    const html = editPairingsPage({ ...editBase, rows: [editRow({ b2: 'a2' })] });
+
+    assert.match(html, /<option value="a2" selected>Joint Current<\/option>/);
+    const b1 = html.slice(html.indexOf('name="map_tl1__b1"')).split('</select>')[0];
+    const b2 = html.slice(html.indexOf('name="map_tl1__b2"')).split('</select>')[0];
+    assert.ok(b1.includes('— not synced —'));
+    assert.equal(b1.includes('— remove —'), false);
+    assert.ok(b2.includes('— remove —'));
   });
-  const base = { connectionId: 'conn_1', provider: 'Monzo', budgetAccounts: editBudgetAccounts };
 
-  it('selects only the matching budget/account pair when account ids repeat across budgets', () => {
-    const shared: BudgetAccounts[] = [
-      { budget: { id: 'b1', name: 'One', syncId: 's1' }, accounts: [{ id: 'dup', name: 'X', offbudget: false, closed: false }] },
-      { budget: { id: 'b2', name: 'Two', syncId: 's2' }, accounts: [{ id: 'dup', name: 'X', offbudget: false, closed: false }] },
-    ];
-    const html = editPairingsPage({ ...base, budgetAccounts: shared, rows: [row({ budgetId: 'b2', actualAccountId: 'dup' })] });
-    assert.equal((html.match(/value="dup" data-budget="[^"]*" selected/g) ?? []).length, 1);
-    assert.match(html, /value="dup" data-budget="b2" selected/);
+  it('shows both targets of a bank account synced into two budgets', () => {
+    const html = editPairingsPage({ ...editBase, rows: [editRow({ b1: 'a1', b2: 'a2' })] });
+    assert.match(html, /<option value="a1" selected>/);
+    assert.match(html, /<option value="a2" selected>/);
+  });
+
+  it('keeps a mapping in a budget that failed to load, named when known', () => {
+    const html = editPairingsPage({
+      ...editBase,
+      configuredBudgets: [{ id: 'b9', name: 'Holiday' }],
+      rows: [editRow({ b9: 'a9' })],
+    });
+    assert.ok(html.includes('<span>Holiday</span>'));
+    assert.match(html, /name="map_tl1__b9"/);
+    assert.match(html, /<option value="a9" selected>a9 \(unavailable — budget not loaded\)<\/option>/);
+    assert.match(html, /<option value="">— remove —<\/option>/);
+  });
+
+  it('renders an unknown budget line when the budget is not configured at all', () => {
+    const html = editPairingsPage({ ...editBase, rows: [editRow({ gone: 'a9' })] });
+    assert.ok(html.includes('Unknown budget gone'));
+    assert.match(html, /name="map_tl1__gone"/);
+  });
+
+  it('keeps a mapped account that is missing from a loaded budget', () => {
+    const html = editPairingsPage({ ...editBase, rows: [editRow({ b1: 'a-missing' })] });
+    assert.match(html, /<option value="a-missing" selected>a-missing \(unavailable — account not loaded\)<\/option>/);
   });
 
   it('escapes names, ids, provider, message, warning and note', () => {
     const html = editPairingsPage({
-      ...base,
+      ...editBase,
       provider: '<script>p</script>',
       message: '<i>m</i>',
       warning: '<i>w</i>',
       note: '<i>n</i>',
-      rows: [row({ truelayerAccountId: 'x"y', name: '<img src=x>', budgetId: 'b"9', actualAccountId: '<a9>' })],
+      rows: [editRow({ 'b"9': '<a9>' }, { truelayerAccountId: 'x"y', name: '<img src=x>' })],
     });
     assert.equal(html.includes('<script>p'), false);
     assert.equal(html.includes('<img'), false);
     assert.equal(html.includes('<i>'), false);
     assert.equal(html.includes('<a9>'), false);
-    assert.ok(html.includes('name="map_x&quot;y"'));
+    assert.ok(html.includes('name="map_x&quot;y__b&quot;9"'));
     assert.ok(html.includes('&lt;i&gt;n&lt;/i&gt;'));
   });
 
-  it('shows the fallback note, and a notice instead of a form when no budgets loaded', () => {
+  it('shows the fallback note, and a notice when no budgets loaded', () => {
     const html = editPairingsPage({
-      ...base,
+      ...editBase,
       budgetAccounts: [],
       note: 'Could not load accounts from TrueLayer (x). Showing saved pairings only.',
-      rows: [row()],
+      rows: [editRow({ b1: 'a1' })],
     });
     assert.match(html, /Showing saved pairings only/);
     assert.match(html, /No budgets could be loaded/);
   });
 
   it('says so when there are no accounts and renders no form', () => {
-    const html = editPairingsPage({ ...base, rows: [] });
+    const html = editPairingsPage({ ...editBase, rows: [] });
     assert.match(html, /No accounts found/);
     assert.equal(html.includes('<form'), false);
   });
 
   it('posts to the connection-scoped URL, encoded', () => {
-    const html = editPairingsPage({ ...base, connectionId: 'a/b', rows: [row()] });
+    const html = editPairingsPage({ ...editBase, connectionId: 'a/b', rows: [editRow({})] });
     assert.ok(html.includes('action="/connections/a%2Fb/pairings"'));
-  });
-
-  it('embeds the same inline script the CSP hash covers', () => {
-    const html = editPairingsPage({ ...base, rows: [row()] });
-    const m = html.match(/<script>([\s\S]*?)<\/script>/);
-    assert.ok(m);
-    assert.equal(`'sha256-${createHash('sha256').update(m[1]).digest('base64')}'`, PAIRING_SCRIPT_CSP_SOURCE);
   });
 });
