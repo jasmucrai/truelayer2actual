@@ -268,6 +268,27 @@ export async function shutdownActual(): Promise<void> {
   }
 }
 
+/**
+ * Pull remote changes into the loaded budget. Call once per budget before
+ * importing, inside `withBudget`.
+ *
+ * The loaded budget is reused across syncs, and `importTransactions` works on
+ * the local copy without pulling first. Stale, that means rules added in Actual
+ * since it was loaded are not applied, and a transaction reconciled as
+ * "updated" is written back in full from the stale copy with a newer timestamp,
+ * undoing edits made in Actual in the meantime (for example a category set by
+ * hand). Unlike `getActualAccounts`, this does not fall back to the local copy
+ * on failure: importing on a stale budget can lose those edits, so the caller
+ * should skip the import and retry on the next run.
+ */
+export async function syncActualBudget(): Promise<void> {
+  try {
+    await (api as unknown as { sync: () => Promise<void> }).sync();
+  } catch (err) {
+    throw new Error(`Could not sync Actual Budget before importing: ${describeError(err)}`);
+  }
+}
+
 export async function getActualAccounts(): Promise<ActualAccount[]> {
   // The loaded budget is reused across calls, so pull remote changes first or
   // accounts added in Actual after it was loaded never show up. Best effort:
