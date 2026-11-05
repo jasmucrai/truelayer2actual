@@ -267,7 +267,7 @@ export function pairingPage(options: PairingPageOptions): string {
         .join('');
       return `<tr>
         <td>${escapeHtml(item.name)}<div class="muted">${escapeHtml(item.currency)} &middot; ${escapeHtml(kind)}</div></td>
-        <td><div class="targets">${lines}</div></td>
+        <td><div class="targets">${lines || '<span class="muted">No budgets available</span>'}</div></td>
       </tr>`;
     })
     .join('');
@@ -355,7 +355,7 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
 
       return `<tr>
         <td>${escapeHtml(row.name)}<div class="muted">${escapeHtml(row.currency)} &middot; ${escapeHtml(kind)}</div></td>
-        <td><div class="targets">${lines}</div></td>
+        <td><div class="targets">${lines || '<span class="muted">No budgets available</span>'}</div></td>
       </tr>`;
     })
     .join('');

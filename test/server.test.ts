@@ -47,6 +47,10 @@ process.env.ACTUAL_PASSWORD ??= 'secret';
 
 const { createApp, hostAllowed, parseTargetFields } = await import('../src/web/server.js');
 const { setPairing } = await import('../src/web/oauth.js');
+// Importing the server pulls in dotenv (via sync.ts), so a local .env would
+// otherwise add an env-defined default budget that CI never has.
+delete process.env.ACTUAL_SYNC_ID;
+delete process.env.ACTUAL_ENCRYPTION_PASSWORD;
 
 interface Res {
   status: number;
@@ -735,7 +739,11 @@ describe('edit pairings routes', () => {
     fs.rmSync(configFile, { force: true });
     const res = await request(app, '/connections/conn_edit/pairings');
     assert.equal(res.status, 200);
-    assert.match(res.body, /— not synced —/);
+    // No config and no env budget: rows still list the bank accounts, with
+    // an explanation instead of selects.
+    assert.match(res.body, /Current/);
+    assert.match(res.body, /No budgets available/);
+    assert.doesNotMatch(res.body, /<select/);
   });
 
   it('POST rejects a cross-site Origin and writes nothing', async () => {
