@@ -82,7 +82,7 @@ const savedEnv = {
 process.env.ACTUAL_SERVER_URL = 'http://actual.invalid';
 process.env.ACTUAL_PASSWORD = 'secret';
 process.chdir(tmpDir);
-const { switchBudget, withBudget, getActualError, shutdownActual, getActualAccounts } = await import('../src/clients/actual.js');
+const { switchBudget, withBudget, getActualError, shutdownActual, getActualAccounts, syncActualBudget } = await import('../src/clients/actual.js');
 process.chdir(originalCwd);
 
 after(async () => {
@@ -269,5 +269,32 @@ describe('getActualAccounts', () => {
     const accounts = await getActualAccounts();
     assert.deepEqual(mock.calls, ['sync', 'getAccounts']);
     assert.deepEqual(accounts.map((a) => a.id), ['a1']);
+  });
+});
+
+describe('syncActualBudget', () => {
+  it('pulls remote changes', async () => {
+    resetMock();
+    await syncActualBudget();
+    assert.deepEqual(mock.calls, ['sync']);
+  });
+
+  it('throws with context when sync fails, so the import is skipped rather than run on a stale budget', async () => {
+    resetMock();
+    mock.onSync = () => {
+      throw new Error('offline');
+    };
+    await assert.rejects(() => syncActualBudget(), /Could not sync Actual Budget before importing: .*offline/);
+  });
+
+  it('syncs once per withBudget call, after the budget is loaded', async () => {
+    resetMock();
+    const loadedAtSync: (string | null)[] = [];
+    mock.onSync = () => {
+      loadedAtSync.push(mock.loadedGroupId);
+    };
+    await withBudget({ syncId: 'sync-once-a' }, () => syncActualBudget());
+    await withBudget({ syncId: 'sync-once-b' }, () => syncActualBudget());
+    assert.deepEqual(loadedAtSync.filter((id) => id?.startsWith('sync-once')), ['sync-once-a', 'sync-once-b']);
   });
 });

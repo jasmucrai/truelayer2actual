@@ -21,6 +21,7 @@ import {
 } from '../clients/truelayer.js';
 import {
   withBudget,
+  syncActualBudget,
   shutdownActual,
   importToActual,
   getActualAccountBalance,
@@ -454,6 +455,9 @@ async function runSyncInternal(): Promise<SyncSummary> {
   for (const { budget, accounts, ready } of grouping.groups) {
     try {
       await withBudget(budget, async () => {
+        // The budget is reused across runs; pull remote changes once before
+        // migrating IDs and importing so stale local data is never written back.
+        await syncActualBudget();
         for (const account of ready) {
           await syncAccount(account, accessTokens.get(account.connectionId)!, lastSyncedAt, summary);
         }
@@ -461,7 +465,7 @@ async function runSyncInternal(): Promise<SyncSummary> {
     } catch (err) {
       // A budget that can't be downloaded shouldn't abort the other budgets.
       const reason = describeError(err);
-      logger.error(`[budget ${budget.name}] Failed to switch budget:`, reason);
+      logger.error(`[budget ${budget.name}] Failed to open or sync budget:`, reason);
       for (const account of accounts) {
         summary.errors.push({
           connectionId: account.connectionId,
