@@ -304,6 +304,7 @@ async function main(): Promise<void> {
     console.log('Account Pairing');
     console.log('===========================================================');
     console.log('For each bank account, choose the Actual budget, then the matching Actual account.');
+    console.log('You can sync a bank account into more than one budget (one account per budget).');
     console.log('Enter the number, "s" to skip, or "r" to refresh the Actual account list.\n');
 
     const accountsCache = new Map<string, ActualAccount[]>();
@@ -316,56 +317,71 @@ async function main(): Promise<void> {
       return accounts;
     }
 
-    for (const { connectionId, tlAccounts, tlCards } of allConnections) {
-      // Pair bank accounts
-      for (const tlAccount of tlAccounts) {
-        const budget = await pickBudget(
-          rl,
-          budgets,
-          `Which Actual budget should "${tlAccount.display_name}" sync into?`
-        );
-        const picked = await pickActualAccount(
-          rl,
-          `${tlAccount.provider.display_name} — ${tlAccount.display_name} (${tlAccount.account_type}) [${tlAccount.currency}]`,
-          () => accountsForBudget(budget)
-        );
+    /**
+     * Pair one bank account/card with an Actual account in a chosen budget, then
+     * offer further budgets (at most one target per budget).
+     */
+    async function pairInBudgets(base: {
+      connectionId: string;
+      name: string;
+      accountKind: Account['accountKind'];
+      truelayerAccountId: string;
+      currency: string;
+      label: string;
+    }): Promise<void> {
+      const used = new Set<string>();
+      let budget = await pickBudget(rl, budgets, `Which Actual budget should "${base.name}" sync into?`);
+      while (true) {
+        const picked = await pickActualAccount(rl, base.label, () => accountsForBudget(budget));
         if (picked) {
+          used.add(budget.id);
           pairedAccounts.push({
-            name: tlAccount.display_name,
-            connectionId,
+            name: base.name,
+            connectionId: base.connectionId,
             budgetId: budget.id,
-            accountKind: 'account' as const,
-            truelayerAccountId: tlAccount.account_id,
+            accountKind: base.accountKind,
+            truelayerAccountId: base.truelayerAccountId,
             actualAccountId: picked.id,
-            currency: tlAccount.currency,
+            currency: base.currency,
           });
-          logger.info(`Paired: "${tlAccount.display_name}" → "${picked.name}" (${budget.name})`);
+          logger.info(
+            `Paired${base.accountKind === 'card' ? ' card' : ''}: "${base.name}" → "${picked.name}" (${budget.name})`
+          );
         }
+
+        if (used.size === 0) return; // skipped; do not offer more budgets
+        const remaining = budgets.filter((b) => !used.has(b.id));
+        if (remaining.length === 0) return;
+        const more = await prompt(rl, `Also sync "${base.name}" into another budget? [y/N]: `);
+        if (more.toLowerCase() !== 'y') return;
+        budget = await pickBudget(rl, remaining, `Which other Actual budget should "${base.name}" sync into?`);
+      }
+    }
+
+    for (const { connectionId, tlAccounts, tlCards } of allConnections) {
+      for (const tlAccount of tlAccounts) {
+        await pairInBudgets({
+          connectionId,
+          name: tlAccount.display_name,
+          accountKind: 'account',
+          truelayerAccountId: tlAccount.account_id,
+          currency: tlAccount.currency,
+          label: `${tlAccount.provider.display_name} — ${tlAccount.display_name} (${tlAccount.account_type}) [${tlAccount.currency}]`,
+        });
       }
 
-      // Pair cards
       for (const tlCard of tlCards) {
-        const budget = await pickBudget(
-          rl,
-          budgets,
-          `Which Actual budget should "${tlCard.display_name}" sync into?`
-        );
-        const label = `${tlCard.provider.display_name} — ${tlCard.display_name}` +
-          (tlCard.partial_card_number ? ` (****${tlCard.partial_card_number})` : '') +
-          ` [${tlCard.card_type}] [${tlCard.currency}]`;
-        const picked = await pickActualAccount(rl, label, () => accountsForBudget(budget));
-        if (picked) {
-          pairedAccounts.push({
-            name: tlCard.display_name,
-            connectionId,
-            budgetId: budget.id,
-            accountKind: 'card' as const,
-            truelayerAccountId: tlCard.account_id,
-            actualAccountId: picked.id,
-            currency: tlCard.currency,
-          });
-          logger.info(`Paired card: "${tlCard.display_name}" → "${picked.name}" (${budget.name})`);
-        }
+        await pairInBudgets({
+          connectionId,
+          name: tlCard.display_name,
+          accountKind: 'card',
+          truelayerAccountId: tlCard.account_id,
+          currency: tlCard.currency,
+          label:
+            `${tlCard.provider.display_name} — ${tlCard.display_name}` +
+            (tlCard.partial_card_number ? ` (****${tlCard.partial_card_number})` : '') +
+            ` [${tlCard.card_type}] [${tlCard.currency}]`,
+        });
       }
     }
 

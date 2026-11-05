@@ -14,6 +14,7 @@ import {
   budgetFromEnv,
 
   mergeAccounts,
+  mappingKey,
   reconcileConfigAccounts,
   applyPairingChanges,
   findBudgetBySyncId,
@@ -48,13 +49,20 @@ describe('mergeAccounts', () => {
     assert.equal(merged[0].lastSyncedAt, '2026-01-01T00:00:00.000Z');
   });
 
-  it('carries the incoming budgetId into a merged account', () => {
-    const existing = [account({ budgetId: 'default' })];
-    const incoming = [account({ budgetId: 'budget_123' })];
+  it('keeps two budgets for one bank account and preserves each lastSyncedAt on re-merge', () => {
+    const existing = [
+      account({ budgetId: 'default', actualAccountId: 'a1', lastSyncedAt: '2026-01-01T00:00:00.000Z' }),
+      account({ budgetId: 'budget_1', actualAccountId: 'b1', lastSyncedAt: '2026-02-01T00:00:00.000Z' }),
+    ];
+    const merged = mergeAccounts(existing, [account({ budgetId: 'budget_1', actualAccountId: 'b2' })]);
 
-    const merged = mergeAccounts(existing, incoming);
+    assert.equal(merged.length, 2);
+    assert.equal(merged[0].actualAccountId, 'a1');
+    assert.equal(merged[1].actualAccountId, 'b2');
+    assert.equal(merged[1].lastSyncedAt, '2026-02-01T00:00:00.000Z');
 
-    assert.equal(merged[0].budgetId, 'budget_123');
+    const added = mergeAccounts([existing[0]], [account({ budgetId: 'budget_1', actualAccountId: 'b1' })]);
+    assert.equal(added.length, 2);
   });
 
   it('appends accounts that are not already mapped', () => {
@@ -120,16 +128,16 @@ describe('reconcileConfigAccounts', () => {
 });
 
 describe('applyPairingChanges', () => {
-  it('re-points a mapping at a new account and budget', () => {
+  it('re-points a mapping at a new account within its budget', () => {
     const accounts = [account({ connectionId: 'conn', budgetId: 'default', actualAccountId: 'old' })];
 
     const result = applyPairingChanges(accounts, 'conn', {
-      'tl-1': { budgetId: 'budget_1', actualAccountId: 'new' },
+      [mappingKey({ truelayerAccountId: 'tl-1', budgetId: 'default' })]: { actualAccountId: 'new' },
     });
 
     assert.equal(result.changed, 1);
     assert.equal(result.removed, 0);
-    assert.equal(result.accounts[0].budgetId, 'budget_1');
+    assert.equal(result.accounts[0].budgetId, 'default');
     assert.equal(result.accounts[0].actualAccountId, 'new');
   });
 
@@ -140,7 +148,7 @@ describe('applyPairingChanges', () => {
     ];
 
     const result = applyPairingChanges(accounts, 'conn', {
-      'tl-1': { budgetId: 'default', actualAccountId: '' },
+      'tl-1__default': { actualAccountId: '' },
     });
 
     assert.equal(result.removed, 1);
@@ -158,7 +166,7 @@ describe('applyPairingChanges', () => {
     ];
 
     const result = applyPairingChanges(accounts, 'conn', {
-      'tl-1': { budgetId: 'default', actualAccountId: 'new' },
+      'tl-1__default': { actualAccountId: 'new' },
     });
 
     assert.equal(result.changed, 1);
@@ -169,7 +177,7 @@ describe('applyPairingChanges', () => {
     const accounts = [account({ connectionId: 'conn', budgetId: 'default', actualAccountId: 'same' })];
 
     const result = applyPairingChanges(accounts, 'conn', {
-      'tl-1': { budgetId: 'default', actualAccountId: 'same' },
+      'tl-1__default': { actualAccountId: 'same' },
     });
 
     assert.equal(result.changed, 0);
@@ -183,7 +191,7 @@ describe('applyPairingChanges', () => {
     ];
 
     const result = applyPairingChanges(accounts, 'conn', {
-      'tl-1': { budgetId: 'budget_1', actualAccountId: 'new' },
+      'tl-1__default': { actualAccountId: 'new' },
     });
 
     assert.equal(result.accounts[0].lastSyncedAt, '2026-01-01T00:00:00.000Z');
@@ -193,7 +201,7 @@ describe('applyPairingChanges', () => {
     const accounts = [account({ connectionId: 'conn', truelayerAccountId: 'constructor' })];
 
     const result = applyPairingChanges(accounts, 'conn', {
-      'tl-unknown': { budgetId: 'default', actualAccountId: 'x' },
+      'tl-unknown__default': { actualAccountId: 'x' },
     });
 
     assert.equal(result.changed, 0);
@@ -210,14 +218,28 @@ describe('applyPairingChanges', () => {
     const snapshot = JSON.stringify(accounts);
 
     const result = applyPairingChanges(accounts, 'conn', {
-      'tl-1': { budgetId: 'budget_1', actualAccountId: 'z' },
-      'tl-2': { budgetId: 'default', actualAccountId: '  ' },
+      'tl-1__default': { actualAccountId: 'z' },
+      'tl-2__default': { actualAccountId: '  ' },
     });
 
     assert.equal(result.changed, 1);
     assert.equal(result.removed, 1);
     assert.deepEqual(result.accounts.map((a) => a.truelayerAccountId), ['tl-1', 'tl-3']);
     assert.equal(JSON.stringify(accounts), snapshot);
+  });
+
+  it('removes one target of a bank account and leaves its other budget alone', () => {
+    const accounts = [
+      account({ connectionId: 'conn', budgetId: 'default', actualAccountId: 'a' }),
+      account({ connectionId: 'conn', budgetId: 'budget_1', actualAccountId: 'b' }),
+    ];
+
+    const result = applyPairingChanges(accounts, 'conn', {
+      'tl-1__default': { actualAccountId: '' },
+    });
+
+    assert.equal(result.removed, 1);
+    assert.deepEqual(result.accounts.map((a) => a.budgetId), ['budget_1']);
   });
 
   it('ignores mappings not present in the changes map', () => {
@@ -420,6 +442,26 @@ describe('loadConfig legacy migration', () => {
     const config = await loadConfig();
 
     assert.deepEqual(config.budgets.map((b) => b.id), ['budget_1']);
+  });
+});
+
+describe('loadConfig duplicate pairings', () => {
+  it('keeps the first of two entries with the same bank account and budget', async () => {
+    writeConfig({
+      budgets: [{ id: 'budget_1', name: 'Joint', syncId: 'sync-j' }],
+      accounts: [
+        { ...legacyAccount, budgetId: 'budget_1', actualAccountId: 'first' },
+        { ...legacyAccount, budgetId: 'budget_1', actualAccountId: 'second' },
+        { ...legacyAccount, budgetId: 'default', actualAccountId: 'other-budget' },
+      ],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    const before = fs.readFileSync(configPath, 'utf-8');
+
+    const config = await loadConfig();
+
+    assert.deepEqual(config.accounts.map((a) => a.actualAccountId), ['first', 'other-budget']);
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before, 'load must not save');
   });
 });
 

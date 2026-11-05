@@ -222,7 +222,7 @@ describe('savePairings', () => {
     if (outcome.type !== 'pair') return;
 
     await assert.rejects(
-      () => savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } }),
+      () => savePairings(outcome.pairingId, { tl_new: [{ budgetId: 'default', actualAccountId: 'actual_1' }] }),
       /Config file could not be loaded/
     );
 
@@ -241,7 +241,7 @@ describe('savePairings', () => {
     assert.equal(outcome.type, 'pair');
     if (outcome.type !== 'pair') return;
 
-    await assert.rejects(() => savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } }));
+    await assert.rejects(() => savePairings(outcome.pairingId, { tl_new: [{ budgetId: 'default', actualAccountId: 'actual_1' }] }));
 
     // Fix the config and retry — the session must still be alive.
     fs.writeFileSync(
@@ -253,7 +253,7 @@ describe('savePairings', () => {
       })
     );
 
-    const result = await savePairings(outcome.pairingId, { tl_new: { budgetId: 'default', actualAccountId: 'actual_1' } });
+    const result = await savePairings(outcome.pairingId, { tl_new: [{ budgetId: 'default', actualAccountId: 'actual_1' }] });
     assert.equal(result.saved, 1);
   });
 });
@@ -279,7 +279,7 @@ describe('savePairings with an unknown budget', () => {
     const tokensBefore = fs.readFileSync(tokensPath, 'utf-8');
 
     await assert.rejects(
-      () => savePairings(outcome.pairingId, { tl_new: { budgetId: 'budget_nope', actualAccountId: 'actual_1' } }),
+      () => savePairings(outcome.pairingId, { tl_new: [{ budgetId: 'budget_nope', actualAccountId: 'actual_1' }] }),
       /Unknown budget/
     );
 
@@ -289,7 +289,7 @@ describe('savePairings with an unknown budget', () => {
 
     // The session was not consumed: retrying with a valid budget id succeeds.
     const result = await savePairings(outcome.pairingId, {
-      tl_new: { budgetId: 'budget_1', actualAccountId: 'actual_1' },
+      tl_new: [{ budgetId: 'budget_1', actualAccountId: 'actual_1' }],
     });
     assert.equal(result.saved, 1);
     const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));

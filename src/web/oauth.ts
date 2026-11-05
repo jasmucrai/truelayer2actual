@@ -397,7 +397,7 @@ export interface PairingSelection {
 
 export async function savePairings(
   pairingId: string,
-  selections: Record<string, PairingSelection>
+  selections: Record<string, PairingSelection[]>
 ): Promise<SavePairingsResult> {
   return withStateLock(async () => {
     // A config.json that exists but fails to load is a hard error: merging
@@ -428,7 +428,7 @@ export async function savePairings(
     // Reject unknown budget ids before consuming the pairing session so the
     // user can correct the form and resubmit.
     const knownBudgets = new Set(budgets.map((b) => b.id));
-    for (const selection of Object.values(selections)) {
+    for (const selection of Object.values(selections).flat()) {
       if (!knownBudgets.has(selection.budgetId)) {
         throw new Error('Unknown budget selected; pairings were not saved. Reload the page and try again.');
       }
@@ -441,17 +441,22 @@ export async function savePairings(
 
     const incoming: Account[] = [];
     for (const item of session.items) {
-      const selection = selections[item.truelayerAccountId];
-      if (!selection) continue;
-      incoming.push({
-        name: item.name,
-        connectionId: session.connectionId,
-        budgetId: selection.budgetId,
-        accountKind: item.accountKind,
-        truelayerAccountId: item.truelayerAccountId,
-        actualAccountId: selection.actualAccountId,
-        currency: item.currency,
-      });
+      // At most one target per budget; a repeated budget keeps the last one.
+      const byBudget = new Map<string, PairingSelection>();
+      for (const selection of selections[item.truelayerAccountId] ?? []) {
+        byBudget.set(selection.budgetId, selection);
+      }
+      for (const selection of byBudget.values()) {
+        incoming.push({
+          name: item.name,
+          connectionId: session.connectionId,
+          budgetId: selection.budgetId,
+          accountKind: item.accountKind,
+          truelayerAccountId: item.truelayerAccountId,
+          actualAccountId: selection.actualAccountId,
+          currency: item.currency,
+        });
+      }
     }
 
     const merged = mergeAccounts(existingConfig?.accounts ?? [], incoming);

@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { pathToFileURL } from 'url';
-import { loadConfig, updateConfig, reauthWarnDays } from '../config.js';
+import { loadConfig, updateConfig, reauthWarnDays, mappingKey } from '../config.js';
 import {
   loadConnection,
   refreshConnectionIfNeeded,
@@ -17,6 +17,7 @@ import {
   getMe,
   ConsentExpiredError,
   type TrueLayerBalance,
+  type TrueLayerTransaction,
   type TrueLayerMe,
 } from '../clients/truelayer.js';
 import {
@@ -61,6 +62,7 @@ function shiftDate(date: string, days: number): string {
  */
 async function migrateImportedIds(
   account: Account,
+  label: string,
   txns: Parameters<typeof planImportedIdMigrations>[0],
   from: string,
   to: string
@@ -76,12 +78,12 @@ async function migrateImportedIds(
     for (const m of plan) await setActualImportedId(m.id, m.imported_id);
     if (plan.length > 0) {
       logger.info(
-        `[${account.name}] Moved ${plan.length} existing transaction(s) to TrueLayer's stable ID`
+        `[${label}] Moved ${plan.length} existing transaction(s) to TrueLayer's stable ID`
       );
     }
   } catch (err) {
     logger.warn(
-      `[${account.name}] Could not migrate imported IDs (import continues):`,
+      `[${label}] Could not migrate imported IDs (import continues):`,
       describeError(err)
     );
   }
@@ -152,26 +154,19 @@ function connectionLabel(connectionId: string): string {
 
 const DRIFT_THRESHOLD_PENCE = 100;
 
-async function validateBalance(accessToken: string, account: Account): Promise<void> {
-  let tlBalance: TrueLayerBalance;
-  try {
-    tlBalance = account.accountKind === 'card'
-      ? await fetchCardBalance(accessToken, account.truelayerAccountId)
-      : await fetchBalance(accessToken, account.truelayerAccountId);
-  } catch (err) {
-    logger.warn(
-      `[${account.name}] Could not fetch balance for validation:`,
-      describeError(err)
-    );
-    return;
-  }
+async function validateBalance(
+  label: string,
+  tlBalance: TrueLayerBalance | undefined,
+  account: Account
+): Promise<void> {
+  if (!tlBalance) return;
 
   let actualBalancePence: number;
   try {
     actualBalancePence = await getActualAccountBalance(account.actualAccountId);
   } catch (err) {
     logger.warn(
-      `[${account.name}] Could not fetch Actual balance for validation:`,
+      `[${label}] Could not fetch Actual balance for validation:`,
       describeError(err)
     );
     return;
@@ -184,13 +179,13 @@ async function validateBalance(accessToken: string, account: Account): Promise<v
 
   if (drift > DRIFT_THRESHOLD_PENCE) {
     logger.warn(
-      `[${account.name}] Balance drift! ` +
+      `[${label}] Balance drift! ` +
         `TrueLayer: £${tlBalance.current.toFixed(2)}, ` +
         `Actual: £${(actualBalancePence / 100).toFixed(2)}, ` +
         `Drift: £${(drift / 100).toFixed(2)}`
     );
   } else {
-    logger.debug(`[${account.name}] Balance consistent (drift: ${drift}p)`);
+    logger.debug(`[${label}] Balance consistent (drift: ${drift}p)`);
   }
 }
 
@@ -328,43 +323,131 @@ export async function runSync(): Promise<SyncSummary> {
   return run;
 }
 
+/** What one TrueLayer account fetch produced, shared by all of its mappings. */
+export type FetchResult =
+  | { txns: TrueLayerTransaction[]; balance?: TrueLayerBalance }
+  | { error: string };
+
+export function fetchKey(a: { connectionId: string; truelayerAccountId: string }): string {
+  return `${a.connectionId}:${a.truelayerAccountId}`;
+}
+
+export interface FetchPlanItem {
+  connectionId: string;
+  truelayerAccountId: string;
+  accountKind: Account['accountKind'];
+  /** Bank account name, for logs. */
+  name: string;
+  /** Earliest `from` across every mapping of this bank account. */
+  from: string;
+  to: string;
+}
+
+/**
+ * Pure planning step: one fetch per unique (connection, bank account), over
+ * the widest window any of its mappings needs. Importing the wider window into
+ * a mapping that needs less is harmless: Actual dedupes by imported_id.
+ */
+export function planFetches(
+  accounts: Account[],
+  lookbackDays: number,
+  nowMs = Date.now()
+): FetchPlanItem[] {
+  const plan = new Map<string, FetchPlanItem>();
+  for (const account of accounts) {
+    const { from, to } = resolveSyncWindow(account.lastSyncedAt, lookbackDays, nowMs);
+    const key = fetchKey(account);
+    const existing = plan.get(key);
+    if (!existing) {
+      plan.set(key, {
+        connectionId: account.connectionId,
+        truelayerAccountId: account.truelayerAccountId,
+        accountKind: account.accountKind,
+        name: account.name,
+        from,
+        to,
+      });
+    } else if (from < existing.from) {
+      existing.from = from;
+    }
+  }
+  return [...plan.values()];
+}
+
+async function executeFetchPlan(
+  plan: FetchPlanItem[],
+  accessTokens: Map<string, string>
+): Promise<Map<string, FetchResult>> {
+  const results = new Map<string, FetchResult>();
+  for (const item of plan) {
+    const accessToken = accessTokens.get(item.connectionId)!;
+    const isCard = item.accountKind === 'card';
+    const key = fetchKey(item);
+    logger.info(`[${item.name}] Fetching from ${item.from} to ${item.to}...`);
+    let txns: TrueLayerTransaction[];
+    try {
+      txns = isCard
+        ? await fetchCardTransactions(accessToken, item.truelayerAccountId, item.from, item.to)
+        : await fetchTransactions(accessToken, item.truelayerAccountId, item.from, item.to);
+    } catch (err) {
+      results.set(key, { error: describeError(err) });
+      continue;
+    }
+    logger.info(`[${item.name}] Fetched ${txns.length} transaction(s)`);
+
+    let balance: TrueLayerBalance | undefined;
+    try {
+      balance = isCard
+        ? await fetchCardBalance(accessToken, item.truelayerAccountId)
+        : await fetchBalance(accessToken, item.truelayerAccountId);
+    } catch (err) {
+      logger.warn(
+        `[${item.name}] Could not fetch balance for validation:`,
+        describeError(err)
+      );
+    }
+    results.set(key, { txns, balance });
+  }
+  return results;
+}
+
 async function syncAccount(
   account: Account,
-  accessToken: string,
+  label: string,
+  fetched: FetchResult | undefined,
   lastSyncedAt: Map<string, string>,
   summary: SyncSummary
 ): Promise<void> {
   try {
+    if (!fetched) throw new Error('No TrueLayer data was fetched for this account');
+    if ('error' in fetched) throw new Error(fetched.error);
+
     const { from, to } = resolveSyncWindow(account.lastSyncedAt, syncLookbackDays());
+    const { txns, balance } = fetched;
 
-    logger.info(`[${account.name}] Syncing from ${from} to ${to}...`);
+    logger.info(`[${label}] Syncing ${txns.length} transaction(s) (window from ${from})...`);
 
-    const txns = account.accountKind === 'card'
-      ? await fetchCardTransactions(accessToken, account.truelayerAccountId, from, to)
-      : await fetchTransactions(accessToken, account.truelayerAccountId, from, to);
-    logger.info(`[${account.name}] Fetched ${txns.length} transaction(s)`);
-
-    await migrateImportedIds(account, txns, from, to);
+    await migrateImportedIds(account, label, txns, from, to);
 
     const isCard = account.accountKind === 'card';
     const mapped = txns.map((t) => mapTransaction(t, isCard));
     const result = await importToActual(account.actualAccountId, mapped);
 
-    logger.info(`[${account.name}] +${result.added.length} added, ${result.updated.length} updated`);
+    logger.info(`[${label}] +${result.added.length} added, ${result.updated.length} updated`);
 
     if (result.errors && result.errors.length > 0) {
       throw new Error(`Import errors: ${JSON.stringify(result.errors)}`);
     }
 
-    await validateBalance(accessToken, account);
-    lastSyncedAt.set(account.truelayerAccountId, new Date().toISOString());
-    summary.synced.push(account.name);
+    await validateBalance(label, balance, account);
+    lastSyncedAt.set(mappingKey(account), new Date().toISOString());
+    summary.synced.push(label);
   } catch (err) {
     const reason = describeError(err);
-    logger.error(`[${account.name}] Sync failed:`, reason);
+    logger.error(`[${label}] Sync failed:`, reason);
     summary.errors.push({
       connectionId: account.connectionId,
-      account: account.name,
+      account: label,
       reason,
     });
   }
@@ -442,7 +525,7 @@ async function runSyncInternal(): Promise<SyncSummary> {
   summary.skipped.push(...skipped);
   summary.errors.push(...errors);
 
-  // Record sync timestamps by TrueLayer account id and persist them with a
+  // Record sync timestamps by mapping (bank account + budget) and persist them with a
   // locked read-merge-write afterwards, so a concurrent reauth/pairing that
   // changed connection ids isn't clobbered by a stale in-memory snapshot.
   const lastSyncedAt = new Map<string, string>();
@@ -452,6 +535,13 @@ async function runSyncInternal(): Promise<SyncSummary> {
   const grouping = groupAccountsByBudget(config, accessTokens);
   summary.errors.push(...grouping.errors);
 
+  // Fetch each bank account once, however many budgets it maps into.
+  const fetchable = grouping.groups.flatMap((g) => g.ready);
+  const fetched = await executeFetchPlan(
+    planFetches(fetchable, syncLookbackDays()),
+    accessTokens
+  );
+
   for (const { budget, accounts, ready } of grouping.groups) {
     try {
       await withBudget(budget, async () => {
@@ -459,7 +549,13 @@ async function runSyncInternal(): Promise<SyncSummary> {
         // migrating IDs and importing so stale local data is never written back.
         await syncActualBudget();
         for (const account of ready) {
-          await syncAccount(account, accessTokens.get(account.connectionId)!, lastSyncedAt, summary);
+          await syncAccount(
+            account,
+            `${account.name} → ${budget.name}`,
+            fetched.get(fetchKey(account)),
+            lastSyncedAt,
+            summary
+          );
         }
       });
     } catch (err) {
@@ -469,7 +565,7 @@ async function runSyncInternal(): Promise<SyncSummary> {
       for (const account of accounts) {
         summary.errors.push({
           connectionId: account.connectionId,
-          account: account.name,
+          account: `${account.name} → ${budget.name}`,
           reason,
         });
       }
@@ -479,7 +575,7 @@ async function runSyncInternal(): Promise<SyncSummary> {
   if (lastSyncedAt.size > 0) {
     await updateConfig((cfg) => {
       for (const account of cfg.accounts) {
-        const ts = lastSyncedAt.get(account.truelayerAccountId);
+        const ts = lastSyncedAt.get(mappingKey(account));
         if (ts) account.lastSyncedAt = ts;
       }
     });
